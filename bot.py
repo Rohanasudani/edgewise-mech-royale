@@ -88,50 +88,14 @@ def near_ring_edge(x, y, ring, radius_sq):
     return False
 
 
-def ring_edge_distance_sq(x, y, ring):
-    """Squared distance from a point to the closest polygon edge."""
-    best = float("inf")
+def ring_signed_area2(ring):
+    """Return twice the signed area; positive rings wind counter-clockwise."""
+    area2 = 0.0
     j = len(ring) - 2
     for i in range(0, len(ring), 2):
-        best = min(best, segment_distance_sq(x, y, ring[j], ring[j + 1], ring[i], ring[i + 1]))
+        area2 += ring[j] * ring[i + 1] - ring[i] * ring[j + 1]
         j = i
-    return best
-
-
-def closest_point_on_ring(x, y, ring):
-    """Return the point on a polygon boundary closest to ``(x, y)``."""
-    best_distance = float("inf")
-    best = (ring[0], ring[1])
-    j = len(ring) - 2
-    for i in range(0, len(ring), 2):
-        ax, ay, bx, by = ring[j], ring[j + 1], ring[i], ring[i + 1]
-        dx, dy = bx - ax, by - ay
-        denom = dx * dx + dy * dy
-        t = clamp(((x - ax) * dx + (y - ay) * dy) / denom, 0.0, 1.0) if denom > EPS else 0.0
-        point = (ax + t * dx, ay + t * dy)
-        distance = (x - point[0]) ** 2 + (y - point[1]) ** 2
-        if distance < best_distance:
-            best_distance, best = distance, point
-        j = i
-    return best
-
-
-def ring_centroid(ring):
-    """Area centroid with a vertex-average fallback for degenerate rings."""
-    twice_area = 0.0
-    cx = 0.0
-    cy = 0.0
-    j = len(ring) - 2
-    for i in range(0, len(ring), 2):
-        cross = ring[j] * ring[i + 1] - ring[i] * ring[j + 1]
-        twice_area += cross
-        cx += (ring[j] + ring[i]) * cross
-        cy += (ring[j + 1] + ring[i + 1]) * cross
-        j = i
-    if abs(twice_area) < EPS:
-        count = len(ring) // 2
-        return (sum(ring[0::2]) / count, sum(ring[1::2]) / count)
-    return (cx / (3.0 * twice_area), cy / (3.0 * twice_area))
+    return area2
 
 
 class Arena:
@@ -170,8 +134,8 @@ class Arena:
                     "ring": ring,
                     "holes": item.get("holes") or [],
                     "bbox": (min(xs), min(ys), max(xs), max(ys)),
+                    "cover_edges": self._cover_edges(ring),
                 }
-                prism["interior"], prism["clearance"] = self._interior_point(prism)
                 index = len(self.prisms)
                 self.prisms.append(prism)
                 min_x, min_y, max_x, max_y = prism["bbox"]
@@ -205,72 +169,89 @@ class Arena:
         return self.cells.get((math.floor(x / self.CELL), math.floor(y / self.CELL)), ())
 
     @staticmethod
-    def _interior_point(prism):
-        """Find a roof point with useful clearance from outer and hole edges."""
-        min_x, min_y, max_x, max_y = prism["bbox"]
-        candidates = [ring_centroid(prism["ring"]), ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)]
-        for ix in range(1, 7):
-            for iy in range(1, 7):
-                candidates.append((min_x + (max_x - min_x) * ix / 7.0, min_y + (max_y - min_y) * iy / 7.0))
-        best = candidates[0]
-        best_clearance_sq = -1.0
-        for x, y in candidates:
-            if not point_in_ring(x, y, prism["ring"]):
-                continue
-            if any(point_in_ring(x, y, hole) for hole in prism["holes"]):
-                continue
-            clearance_sq = ring_edge_distance_sq(x, y, prism["ring"])
-            for hole in prism["holes"]:
-                clearance_sq = min(clearance_sq, ring_edge_distance_sq(x, y, hole))
-            if clearance_sq > best_clearance_sq:
-                best_clearance_sq = clearance_sq
-                best = (x, y)
-        return best, math.sqrt(max(0.0, best_clearance_sq))
+    def _cover_edges(ring):
+        """Pre-sample outer walls and their outward normals for cover routing."""
+        counter_clockwise = ring_signed_area2(ring) > 0.0
+        samples = []
+        j = len(ring) - 2
+        for i in range(0, len(ring), 2):
+            ax, ay, bx, by = ring[j], ring[j + 1], ring[i], ring[i + 1]
+            dx, dy = bx - ax, by - ay
+            edge_length = math.hypot(dx, dy)
+            if edge_length > 0.5:
+                outward = unit((dy, -dx) if counter_clockwise else (-dy, dx))
+                pieces = max(1, min(8, math.ceil(edge_length / 16.0)))
+                for piece in range(pieces):
+                    fraction = (piece + 0.5) / pieces
+                    samples.append(((ax + dx * fraction, ay + dy * fraction), outward))
+            j = i
+        return samples
 
-    def escape_roof(self, pos, energy, radius, zone, height=9.0):
-        """Choose a reachable nearby roof and an approach point just inside its edge."""
+    @staticmethod
+    def _cover_depth(prism, threat, target):
+        """Approximate how much solid wall lies between a threat and target."""
+        distance = distance2(threat, target)
+        if distance < 2.0:
+            return 0.0
+        checked_distance = min(distance, 42.0)
+        steps = max(2, math.ceil(checked_distance / 1.6))
+        step_length = checked_distance / steps
+        run = 0
+        best_run = 0
+        for step in range(1, steps):
+            fraction = 1.0 - (step * step_length) / distance
+            x = threat[0] + (target[0] - threat[0]) * fraction
+            y = threat[1] + (target[1] - threat[1]) * fraction
+            solid = point_in_ring(x, y, prism["ring"]) and not any(point_in_ring(x, y, hole) for hole in prism["holes"])
+            if solid:
+                run += 1
+                best_run = max(best_run, run)
+            else:
+                run = 0
+        return best_run * step_length
+
+    def cover_target(self, pos, threat, radius, height, zone):
+        """Find a nearby point whose building wall blocks the pursuing mech."""
         if not self.ok:
             return None
-        max_rise = min(40.0, max(0.0, (energy - 18.0) * 0.52))
-        if max_rise < 7.0:
-            return None
         cell_x, cell_y = math.floor(pos[0] / self.CELL), math.floor(pos[1] / self.CELL)
-        candidates = set()
-        for gx in range(cell_x - 2, cell_x + 3):
-            for gy in range(cell_y - 2, cell_y + 3):
-                candidates.update(self.cells.get((gx, gy), ()))
+        nearby = set()
+        for gx in range(cell_x - 3, cell_x + 4):
+            for gy in range(cell_y - 3, cell_y + 4):
+                nearby.update(self.cells.get((gx, gy), ()))
 
+        shot_height = (pos[2] + threat[2]) * 0.5 + min(7.0, height * 0.7)
         best_score = float("inf")
         best = None
-        for index in candidates:
+        for index in nearby:
             prism = self.prisms[index]
-            if prism["kind"] not in {"building", "stadium"} or prism["clearance"] < radius + 0.8:
+            if prism["kind"] not in {"building", "stadium"}:
                 continue
-            rise = prism["top"] - pos[2]
-            if rise < 6.0 or rise > max_rise:
+            if shot_height < prism["base"] + 0.2 or shot_height > prism["top"] - 0.2:
                 continue
-            inner = prism["interior"]
-            edge = closest_point_on_ring(pos[0], pos[1], prism["ring"])
-            inward = unit((inner[0] - edge[0], inner[1] - edge[1]))
-            inset = min(distance2(edge, inner), max(4.0, radius + 1.5))
-            target = (edge[0] + inward[0] * inset, edge[1] + inward[1] * inset)
-            valid_target = point_in_ring(target[0], target[1], prism["ring"]) and not any(
-                point_in_ring(target[0], target[1], hole) for hole in prism["holes"]
-            )
-            if not valid_target or ring_edge_distance_sq(target[0], target[1], prism["ring"]) < (radius + 0.35) ** 2:
-                target = inner
-            horizontal = distance2(pos, target)
-            if horizontal > 58.0:
-                continue
-            if self.blocked(target[0], target[1], prism["top"], radius, height):
-                continue
-            zone_margin = zone[2] - distance2(target, zone[:2])
-            if zone_margin < radius + 7.0:
-                continue
-            score = horizontal + rise * 0.48 - min(prism["clearance"], 10.0) * 0.22
-            if score < best_score:
-                best_score = score
-                best = {"target": target, "edge": edge, "top": prism["top"], "index": index}
+            for wall, outward in prism["cover_edges"]:
+                toward_threat = (threat[0] - wall[0], threat[1] - wall[1])
+                if dot2(toward_threat, outward) > -2.0:
+                    continue
+                target = (wall[0] + outward[0] * (radius + 3.2), wall[1] + outward[1] * (radius + 3.2))
+                travel = distance2(pos, target)
+                if travel > 72.0:
+                    continue
+                if zone[2] - distance2(target, zone[:2]) < radius + 8.0:
+                    continue
+                target_ground = self.ground(target[0], target[1])
+                if abs(target_ground - pos[2]) > 5.0:
+                    continue
+                if self.blocked(target[0], target[1], target_ground, radius + 0.25, height):
+                    continue
+                depth = self._cover_depth(prism, threat, target)
+                if depth < max(8.0, radius * 2.5):
+                    continue
+                enemy_distance = distance2(threat, target)
+                score = travel - min(depth, 18.0) * 0.9 - min(enemy_distance, 120.0) * 0.035
+                if score < best_score:
+                    best_score = score
+                    best = {"target": target, "index": index, "depth": depth}
         return best
 
     def blocked(self, x, y, feet_z, radius, height):
@@ -355,7 +336,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v3"
+    name = "edgewise-v4"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -368,10 +349,11 @@ class RoyaleBot:
         self.last_jump = -10.0
         self.scan_yaw = self.rng.uniform(-math.pi, math.pi)
         self.damage_bearing = None
+        self.damage_source = None
         self.damage_until = -1.0
         self.attacker = None
-        self.climb_goal = None
-        self.climb_cooldown = -1.0
+        self.cover_goal = None
+        self.cover_cooldown = -1.0
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
         self.pickup_radius = float(self.cfg["loot"]["pickup_radius"])
 
@@ -579,6 +561,7 @@ class RoyaleBot:
                 fire[slot] = True
             else:
                 fire[slot] = False  # releasing the trigger fires the beam
+            # Gun fire shares a direct aim with the laser and is essentially free pressure.
             if "gun" in slots and aligned:
                 fire[slots["gun"][0]] = True
         elif chosen_kind == "mortar":
@@ -595,53 +578,68 @@ class RoyaleBot:
         reload_now = bool(gun and gun[1].get("reload", 0.0) <= 0.0 and gun[1].get("ammo", 12) <= 2 and not fire[gun[0]])
         return aim, fire, reload_now
 
-    def _climb_override(self, obs, threatened, current_margin, current_zone):
-        """Start or continue a short, committed jet climb onto a nearby roof."""
+    def _cover_behavior(self, obs, target, urgent, current_margin, current_zone):
+        """Commit to geometry-verified hard cover while the squad has pressure."""
         me = obs["self"]
         pos = me["pos"]
         now = float(obs["t"])
-        energy = float(me["energy"])
+        radius = float(me["stats"].get("radius", 2.5))
+        height = float(me["stats"].get("height", 9.0))
 
-        if self.climb_goal is not None:
-            goal = self.climb_goal
-            timed_out = now - goal["started"] > 7.0
-            unsafe = current_margin < 7.0 or energy < 9.0
-            if timed_out or unsafe:
-                self.climb_goal = None
-                self.climb_cooldown = now + 5.0
-            else:
-                target = goal["target"]
-                move = unit((target[0] - pos[0], target[1] - pos[1]))
-                roof_ready = pos[2] >= goal["top"] - self.arena.max_step + 0.15
-                at_wall = distance2(pos, goal["edge"]) <= float(me["stats"].get("radius", 2.5)) + 2.0
-                settled = roof_ready and distance2(pos, target) < max(3.0, float(me["stats"].get("radius", 2.5)) + 0.7)
-                if settled:
-                    self.climb_goal = None
-                    self.climb_cooldown = now + 4.0
-                    return None
-                return {
-                    "move": [move[0], move[1]],
-                    "boost": bool(not roof_ready and energy > 9.0),
-                    "jump": bool(me["grounded"] and at_wall and not roof_ready and now - self.last_jump > 0.9),
-                }
+        visible_attacker = next((enemy for enemy in obs.get("mechs", []) if enemy.get("id") == self.attacker), None)
+        source = visible_attacker or target
+        if source is not None:
+            threat_pos = source["pos"]
+        elif self.damage_source is not None and now < self.damage_until:
+            threat_pos = self.damage_source
+        else:
+            threat_pos = None
 
-        if not threatened or not me["grounded"] or now < self.climb_cooldown or current_margin < 16.0 or energy < 58.0:
+        if urgent or current_margin < radius + 7.0:
+            self.cover_goal = None
             return None
-        goal = self.arena.escape_roof(
-            pos,
-            energy,
-            float(me["stats"].get("radius", 2.5)),
-            current_zone,
-            float(me["stats"].get("height", 9.0)),
+
+        if self.cover_goal is not None:
+            goal = self.cover_goal
+            goal_margin = current_zone[2] - distance2(goal["target"], current_zone[:2])
+            expired = now - goal["started"] > 5.5 or goal_margin < radius + 6.0
+            exposed = False
+            if threat_pos is not None and now - goal["started"] > 0.9:
+                prism = self.arena.prisms[goal["index"]]
+                exposed = self.arena._cover_depth(prism, threat_pos, goal["target"]) < max(8.0, radius * 2.5)
+            if expired or exposed:
+                self.cover_goal = None
+                self.cover_cooldown = now + (0.4 if exposed else 1.5)
+            else:
+                remaining = distance2(pos, goal["target"])
+                if remaining <= radius + 1.0:
+                    if target is None:
+                        return {"hold": True, "direction": (0.0, 0.0), "speed": 0.0}
+                    self.cover_goal = None
+                    self.cover_cooldown = now + 0.4
+                else:
+                    return {
+                        "hold": False,
+                        "direction": unit((goal["target"][0] - pos[0], goal["target"][1] - pos[1])),
+                        "speed": 1.0,
+                    }
+
+        pressure = threat_pos is not None and (
+            now < self.damage_until or (target is not None and distance2(pos, target["pos"]) < 145.0)
         )
+        if not pressure or now < self.cover_cooldown:
+            return None
+        goal = self.arena.cover_target(pos, threat_pos, radius, height, current_zone)
         if goal is None:
-            self.climb_cooldown = now + 2.0
+            self.cover_cooldown = now + 1.2
             return None
         goal["started"] = now
-        self.climb_goal = goal
-        move = unit((goal["target"][0] - pos[0], goal["target"][1] - pos[1]))
-        at_wall = distance2(pos, goal["edge"]) <= float(me["stats"].get("radius", 2.5)) + 2.0
-        return {"move": [move[0], move[1]], "boost": True, "jump": at_wall}
+        self.cover_goal = goal
+        return {
+            "hold": False,
+            "direction": unit((goal["target"][0] - pos[0], goal["target"][1] - pos[1])),
+            "speed": 1.0,
+        }
 
     def act(self, obs):
         me = obs["self"]
@@ -650,6 +648,11 @@ class RoyaleBot:
         for event in obs.get("events", []):
             if event.get("type") == "damaged" and event.get("bearing") is not None:
                 self.damage_bearing = float(event["bearing"])
+                self.damage_source = [
+                    pos[0] + math.cos(self.damage_bearing) * 85.0,
+                    pos[1] + math.sin(self.damage_bearing) * 85.0,
+                    pos[2],
+                ]
                 self.damage_until = now + 3.2
                 self.attacker = event.get("by")
 
@@ -659,15 +662,22 @@ class RoyaleBot:
         threat, closest = self._threat_vector(obs, enemies)
         dodge, projectile_danger = self._projectile_dodge(obs)
         threatened = closest < 105.0 or now < self.damage_until or projectile_danger
+        current_zone = (obs["zone"]["center"][0], obs["zone"]["center"][1], float(obs["zone"]["radius"]))
+        cover = self._cover_behavior(obs, target, urgent, current_margin, current_zone)
+        cover_routing = cover is not None and not cover["hold"]
+        cover_hold = cover is not None and cover["hold"]
 
         objective = zone_vector
         objective_speed = 0.40  # below the default footstep threshold when walking
         pickup = self._select_pickup(obs, enemies)
         pickup_distance = distance2(pos, pickup["pos"]) if pickup else 1e9
-        if pickup and pickup_distance < 58.0 and not threatened and current_margin > 18.0:
+        if cover_routing:
+            objective = cover["direction"]
+            objective_speed = cover["speed"]
+        elif pickup and pickup_distance < 58.0 and not threatened and current_margin > 18.0:
             objective = unit((pickup["pos"][0] - pos[0], pickup["pos"][1] - pos[1]))
             objective_speed = 0.72
-        if not threatened and not urgent and pickup is None:
+        if cover is None and not threatened and not urgent and pickup is None:
             cubes = [cube for cube in obs.get("cubes", []) if distance2(pos, cube["pos"]) < 32.0]
             if cubes:
                 cube = min(cubes, key=lambda item: distance2(pos, item["pos"]))
@@ -680,9 +690,14 @@ class RoyaleBot:
                     objective = unit((drop["pos"][0] - pos[0], drop["pos"][1] - pos[1]))
                     objective_speed = 0.75
 
-        desired = [objective[0] * (1.6 if urgent else 0.9), objective[1] * (1.6 if urgent else 0.9)]
-        desired[0] += threat[0] * 1.75 + dodge[0] * 2.8
-        desired[1] += threat[1] * 1.75 + dodge[1] * 2.8
+        if cover_routing:
+            desired = [objective[0] * 2.7, objective[1] * 2.7]
+            desired[0] += threat[0] * 0.35 + dodge[0] * 3.0
+            desired[1] += threat[1] * 0.35 + dodge[1] * 3.0
+        else:
+            desired = [objective[0] * (1.6 if urgent else 0.9), objective[1] * (1.6 if urgent else 0.9)]
+            desired[0] += threat[0] * 1.75 + dodge[0] * 2.8
+            desired[1] += threat[1] * 1.75 + dodge[1] * 2.8
         desired = unit(desired, fallback=objective)
 
         commanded_before = length2(self.last_move)
@@ -691,11 +706,13 @@ class RoyaleBot:
         else:
             self.stuck_ticks = max(0, self.stuck_ticks - 2)
         stuck = self.stuck_ticks >= 7
+        if cover_hold:
+            self.stuck_ticks = 0
+            stuck = False
         if stuck:
             angle = math.atan2(desired[1], desired[0]) + self.turn_sign * 1.15
             desired = (math.cos(angle), math.sin(angle))
 
-        current_zone = (obs["zone"]["center"][0], obs["zone"]["center"][1], float(obs["zone"]["radius"]))
         steered, direct_clear = self.arena.steer(
             pos,
             desired,
@@ -710,10 +727,10 @@ class RoyaleBot:
         energy = float(me["energy"])
         boost = bool((urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0))
         jump = bool(me["grounded"] and (projectile_danger or stuck or (closest < 32.0 and now < self.damage_until)) and now - self.last_jump > 1.15)
-
-        climb = self._climb_override(obs, threatened, current_margin, current_zone)
-        if climb is not None:
-            move, boost, jump = climb["move"], climb["boost"], climb["jump"]
+        if cover_hold and not projectile_danger:
+            move = [0.0, 0.0]
+            boost = False
+            jump = False
         if jump:
             self.last_jump = now
 
@@ -726,7 +743,7 @@ class RoyaleBot:
             pick = self._upgrade_pick(offer)
             if pick is not None:
                 action["pick"] = pick
-        if pickup and pickup_distance <= self.pickup_radius + 0.15:
+        if cover is None and pickup and pickup_distance <= self.pickup_radius + 0.15:
             empty = next((i for i, weapon in enumerate(me["weapons"]) if weapon is None), None)
             if empty is not None:
                 action["take"] = pickup["id"]

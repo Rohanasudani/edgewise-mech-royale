@@ -26,31 +26,73 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(x, 0.6)
         self.assertAlmostEqual(y, 0.8)
 
-    def test_ring_centroid_and_closest_boundary_point(self):
+    def test_ring_winding(self):
         square = [10, 10, 30, 10, 30, 30, 10, 30]
-        self.assertEqual(BOT.ring_centroid(square), (20.0, 20.0))
-        self.assertEqual(BOT.closest_point_on_ring(0, 20, square), (10.0, 20.0))
+        clockwise = [10, 30, 30, 30, 30, 10, 10, 10]
+        self.assertGreater(BOT.ring_signed_area2(square), 0.0)
+        self.assertLess(BOT.ring_signed_area2(clockwise), 0.0)
 
-    def test_escape_roof_selects_reachable_interior_target(self):
+    def test_cover_target_puts_building_between_mech_and_threat(self):
         arena = BOT.Arena.__new__(BOT.Arena)
         arena.ok = True
         arena.CELL = 30.0
         arena.max_step = 1.2
+        ring = [10, 10, 30, 10, 30, 30, 10, 30]
         arena.prisms = [{
             "kind": "building",
             "base": 0.0,
             "top": 12.0,
-            "ring": [10, 10, 30, 10, 30, 30, 10, 30],
+            "ring": ring,
             "holes": [],
             "bbox": (10, 10, 30, 30),
-            "interior": (20.0, 20.0),
-            "clearance": 10.0,
+            "cover_edges": BOT.Arena._cover_edges(ring),
         }]
         arena.cells = {(0, 0): [0], (1, 0): [0], (0, 1): [0], (1, 1): [0]}
-        goal = arena.escape_roof([0, 20, 0], 100.0, 2.5, (0.0, 0.0, 200.0))
+        arena.ground = lambda x, y: 0.0
+        goal = arena.cover_target([0, 20, 0], [-80, 20, 0], 2.5, 9.0, (20.0, 20.0, 200.0))
         self.assertIsNotNone(goal)
-        self.assertEqual(goal["top"], 12.0)
-        self.assertTrue(BOT.point_in_ring(goal["target"][0], goal["target"][1], arena.prisms[0]["ring"]))
+        self.assertFalse(BOT.point_in_ring(goal["target"][0], goal["target"][1], ring))
+        self.assertGreater(goal["target"][0], 30.0)
+        self.assertGreaterEqual(goal["depth"], 8.0)
+
+    def test_cover_behavior_routes_then_holds_after_losing_sight(self):
+        arena = BOT.Arena.__new__(BOT.Arena)
+        arena.ok = True
+        arena.CELL = 30.0
+        arena.max_step = 1.2
+        ring = [10, 10, 30, 10, 30, 30, 10, 30]
+        arena.prisms = [{
+            "kind": "building",
+            "base": 0.0,
+            "top": 12.0,
+            "ring": ring,
+            "holes": [],
+            "bbox": (10, 10, 30, 30),
+            "cover_edges": BOT.Arena._cover_edges(ring),
+        }]
+        arena.cells = {(0, 0): [0], (1, 0): [0], (0, 1): [0], (1, 1): [0]}
+        arena.ground = lambda x, y: 0.0
+
+        bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
+        bot.arena = arena
+        bot.attacker = 7
+        bot.damage_bearing = 0.0
+        bot.damage_source = [0, 20, 0]
+        bot.damage_until = 3.2
+        bot.cover_goal = None
+        bot.cover_cooldown = -1.0
+        enemy = {"id": 7, "kind": "mech", "pos": [0, 20, 0]}
+        me = {"pos": [0, 20, 0], "stats": {"radius": 2.5, "height": 9.0}}
+        obs = {"t": 0.0, "self": me, "mechs": [enemy]}
+        route = bot._cover_behavior(obs, enemy, False, 200.0, (20.0, 20.0, 200.0))
+        self.assertIsNotNone(route)
+        self.assertFalse(route["hold"])
+
+        me["pos"] = [bot.cover_goal["target"][0], bot.cover_goal["target"][1], 0.0]
+        obs["t"] = 1.0
+        obs["mechs"] = []
+        hold = bot._cover_behavior(obs, None, False, 200.0, (20.0, 20.0, 200.0))
+        self.assertTrue(hold["hold"])
 
 
 if __name__ == "__main__":

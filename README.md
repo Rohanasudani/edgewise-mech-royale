@@ -7,7 +7,7 @@ Edgewise is a deterministic, survival-first bot for the `mechfight/1` protocol. 
 - Stay near the useful edge of the next safe circle instead of joining fights in the center.
 - Walk silently while unthreatened; boost, jump, and strafe only when pressure or the zone justifies the energy and noise.
 - Use the arena geometry and terrain for local collision avoidance.
-- Jet onto reachable nearby rooftops under pressure, then settle safely beyond the roof edge.
+- Route behind nearby buildings that provide deep, verified cover from the pursuing squad.
 - Acquire one non-gun weapon without taking a dangerous detour.
 - Face recent attackers to protect rear armor, dodge incoming projectiles, and retreat while returning accurate fire.
 - Prefer armor, health, mobility, and recovery upgrades over damage.
