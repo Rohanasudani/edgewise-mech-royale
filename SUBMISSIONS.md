@@ -8,6 +8,7 @@ Keep every submitted commit public until the event results are published. The Bu
 | `submission-02` | `eceadfc` | 2026-11-20 8:22 PM ET | Breaking contact below 72% HP creates enough quiet time to regenerate. | 0.46 | Passed and scored | Receipt `BB-E5AF82EF`; rejected hypothesis; `submission-01` remains selected |
 | `submission-03` | `2e34703` | 2026-11-20 8:32 PM ET | Pressure-triggered roof climbs break coordinated pursuit. | 1.38 | Passed and scored | Receipt `BB-9AA67944`; hypothesis underperformed; `submission-01` remains selected |
 | `v0.4.1` | `fe564ad` | 2026-11-20 9:05 PM ET | Walkable routes to building cover and correctly timed repairs improve survival. | 1.44 | Passed and scored | Receipt `BB-7C4A40DF`; `submission-01` remains selected |
+| `submission-05` | `4422412` | 2026-11-21 11:45 AM ET | Improve firing uptime and use the second weapon earlier with 0.1 survival behavior. | 2.13 | Passed and scored | Receipt `BB-190C56CE`; selected as best entry |
 
 ## Candidate checklist
 
