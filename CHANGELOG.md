@@ -2,6 +2,10 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.14.0 - 2026-11-21
+
+- Route to reachable supply drops before touchdown and hold uncontested capture rings for upgrades and repairs.
+
 ## 0.13.0 - 2026-11-21
 
 - Plan jet crossings between disconnected walking regions when the zone is closing.

@@ -451,7 +451,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v13"
+    name = "edgewise-v14"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -465,6 +465,9 @@ class RoyaleBot:
         self.weapon_goal = None
         self.weapon_route = deque()
         self.weapon_route_retry = -1.0
+        self.drop_goal = None
+        self.drop_route = deque()
+        self.drop_route_retry = -1.0
         self.jet_route = deque()
         self.jet_gate = None
         self.jet_retry = -1.0
@@ -724,6 +727,84 @@ class RoyaleBot:
         action["move"] = [steered[0] * speed, steered[1] * speed]
         if nearest > 135.0 and me["energy"] > 70.0 and gap > 26.0:
             action["boost"] = True
+
+    def _supply_action(self, obs, enemies, urgent, margin, danger, action):
+        """Plan the approach while a supply drop is still inbound and hold its capture ring."""
+        drops = obs.get("drops", ())
+        me, zone, now = obs["self"], obs["zone"], obs["t"]
+        if (not drops or not self.arena.ok or urgent or margin < 26.0 or danger or not me["grounded"]
+                or self.jet_gate is not None or self.jet_phase is not None or action["jump"] or action.get("take")):
+            return
+
+        pos, stats = me["pos"], me["stats"]
+        speed = stats.get("walk_speed", 11.7)
+        choices = []
+        for drop in drops:
+            if drop.get("holder") not in (None, me["id"]):
+                continue
+            point = drop["pos"]
+            distance = distance2(pos, point)
+            arrival = max(0.0, distance - 5.0) / speed
+            lands_in = drop.get("lands_in", 0.0)
+            if distance > 265.0 or arrival > max(11.0, lands_in + 5.0):
+                continue
+            if self._inside_margin(point, zone["center"], zone["radius"]) < 24.0:
+                continue
+            if self._inside_margin(point, zone["next_center"], zone["next_radius"]) < 12.0 and arrival + 9.0 > zone["shrink_end"] - now:
+                continue
+            choices.append((arrival - lands_in * 0.22, drop["id"], drop))
+        if not choices:
+            self.drop_goal = None
+            self.drop_route.clear()
+            return
+
+        _, identifier, drop = min(choices)
+        point = drop["pos"]
+        gap = distance2(pos, point)
+        lands_in = drop.get("lands_in", 0.0)
+        if self.weapon_goal is not None and gap > 13.0 and lands_in > 8.0 and me.get("cubes", 0) < 3:
+            if all(weapon is None or weapon["kind"] == "gun" for weapon in me["weapons"]):
+                return
+        for enemy in sorted(enemies, key=lambda foe: distance2(pos, foe["pos"]))[:3]:
+            near = distance2(pos, enemy["pos"])
+            if near < 42.0 or distance2(point, enemy["pos"]) < 36.0:
+                return
+            if now < self.damage_until and near < 99.0:
+                muzzle = (*enemy["pos"][:2], enemy["pos"][2] + 7.0)
+                if self.arena.shot_clear(muzzle, (*pos[:2], pos[2] + 4.5)):
+                    return
+
+        if self.drop_goal != identifier:
+            self.drop_goal = identifier
+            self.drop_route.clear()
+            self.drop_route_retry = -1.0
+        capture_radius = self.cfg["drops"]["radius"]
+        if gap < capture_radius - 2.2 and abs(pos[2] - point[2]) < 3.5:
+            action.update(move=[0.0, 0.0], boost=False)
+            return
+
+        radius, height = stats.get("radius", 2.5), stats.get("height", 9.0)
+        heading = unit((point[0] - pos[0], point[1] - pos[1]))
+        check = min(gap, 42.0)
+        probe = (pos[0] + heading[0] * check, pos[1] + heading[1] * check)
+        if self.arena.ground_leg_clear(pos, (*probe, self.arena.ground(*probe)), radius, height):
+            self.drop_route.clear()
+        else:
+            if not self.drop_route and now >= self.drop_route_retry:
+                route = self.routes.route(pos, point[:2], 5.6)
+                if route and distance2(route[-1], point) <= 15.0:
+                    self.drop_route.extend(route)
+                self.drop_route_retry = now + 1.4
+            while self.drop_route and distance2(pos, self.drop_route[0]) < 4.1:
+                self.drop_route.popleft()
+            if not self.drop_route or distance2(pos, self.drop_route[0]) > 24.0:
+                return
+            x, y = self.drop_route[0][:2]
+            heading = unit((x - pos[0], y - pos[1]))
+        heading, _ = self.arena.steer(pos, heading, action["move"], radius, height, (*zone["center"], zone["radius"]))
+        magnitude = 0.52 if gap < capture_radius + 4.0 else 1.0
+        action.update(move=[heading[0] * magnitude, heading[1] * magnitude],
+                      boost=gap > 28.0 and me["energy"] > 64.0 and gap / speed > lands_in + 2.0)
 
     def _zone_plan(self, obs):
         me = obs["self"]
@@ -1381,6 +1462,7 @@ class RoyaleBot:
 
         self._arm_action(obs, enemies, urgent, current_margin, next_margin, projectile_danger, action)
         self._exit_terrain(obs, next_margin, action)
+        self._supply_action(obs, enemies, urgent, current_margin, projectile_danger, action)
 
         self.last_move = tuple(action["move"])
         self.last_pos = tuple(pos)

@@ -236,6 +236,10 @@ class ProgressionTests(unittest.TestCase):
         self.bot.weapon_goal = None
         self.bot.weapon_route = deque()
         self.bot.weapon_route_retry = -1.0
+        self.bot.drop_goal = None
+        self.bot.drop_route = deque()
+        self.bot.drop_route_retry = -1.0
+        self.bot.jet_gate = None
         self.bot.jet_phase = None
         self.bot.focus = None
         self.bot.focus_until = -1.0
@@ -329,6 +333,19 @@ class ProgressionTests(unittest.TestCase):
         self.obs["self"]["pos"][2] = 9
         self.bot._exit_terrain(self.obs, -30, action)
         self.assertEqual(action["move"], [1.0, 0.0])
+
+    def test_supply_capture_stops_inside_an_uncontested_ring(self):
+        self.bot.arena.ok = True
+        self.bot.cfg = {"drops": {"radius": 8.0}}
+        self.obs["self"]["grounded"] = True
+        self.obs["drops"] = [{"id": 9000, "pos": [3, 0, 0], "lands_in": 0, "holder": 1}]
+        action = {"move": [1.0, 0.0], "boost": True, "jump": False}
+        rival = dict(self.foe, pos=[32, 0, 0])
+        self.bot._supply_action(self.obs, [rival], False, 300.0, False, action)
+        self.assertEqual(action["move"], [1.0, 0.0])
+        self.bot._supply_action(self.obs, [], False, 300.0, False, action)
+        self.assertEqual(action["move"], [0.0, 0.0])
+        self.assertFalse(action["boost"])
 
 
 if __name__ == "__main__":
