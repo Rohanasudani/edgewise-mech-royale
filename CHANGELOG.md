@@ -2,6 +2,10 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.11.0 - 2026-11-21
+
+- Compare reachable ground movement against several incoming shots while preserving progress toward a closing zone.
+
 ## 0.10.0 - 2026-11-21
 
 - Prioritize inward movement when the closing zone becomes urgent under fire.

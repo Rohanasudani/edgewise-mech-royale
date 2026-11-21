@@ -66,6 +66,26 @@ class EvasionTests(unittest.TestCase):
     def test_ignores_nearby_mortar_moving_toward_distant_impact(self):
         self.assertFalse(self.dodge([5, 0, 22], [50, 0, -4], "mortar")[1])
 
+    def test_considers_a_second_shot_when_steering(self):
+        self.me["weapons"] = []
+        heading = (1, 0)
+        obs = {"self": self.me, "projectiles": [
+            {"kind": "gun", "pos": [-90, -4, 5], "vel": [252, 0, 0]},
+        ]}
+        self.assertEqual(self.bot._steer_around_shots(obs, heading, heading, False, True), heading)
+        obs["projectiles"].append({"kind": "gun", "pos": [5, -90, 5], "vel": [0, 252, 0]})
+        move = self.bot._steer_around_shots(obs, heading, heading, False, True)
+        self.assertGreater(move[1], 0.8)
+
+    def test_shot_forecast_preserves_urgent_zone_progress(self):
+        self.me["weapons"] = []
+        heading = (0, -1)
+        obs = {"self": self.me, "projectiles": [
+            {"kind": "gun", "pos": [-90, -4, 5], "vel": [252, 0, 0]},
+        ]}
+        move = self.bot._steer_around_shots(obs, heading, heading, True, True)
+        self.assertGreater(BOT.dot2(move, heading), 0.35)
+
 
 class CombatTests(unittest.TestCase):
     def setUp(self):

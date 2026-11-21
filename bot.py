@@ -285,7 +285,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v10"
+    name = "edgewise-v11"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -588,6 +588,66 @@ class RoyaleBot:
             previous_t, previous_height = elapsed, height
         return None
 
+    def _steer_around_shots(self, obs, heading, zone_vector, urgent, boost):
+        """Compare reachable headings against imminent straight-line shots."""
+        me = obs["self"]
+        x, y, z = me["pos"]
+        vx, vy = me["vel"][:2]
+        stats = me["stats"]
+        radius = float(stats.get("radius", 2.5))
+        height = float(stats.get("height", 9.0))
+        speed = float(stats.get("boost_speed", 19.5) if boost else stats.get("walk_speed", 11.7))
+        if any(weapon and weapon.get("charge", 0.0) > 0.0 for weapon in me["weapons"]):
+            speed *= 0.5
+        horizon = 0.56
+        shots = []
+        for projectile in obs.get("projectiles", ()):
+            if projectile["kind"] == "mortar":
+                continue
+            px, py, pz = projectile["pos"]
+            dx, dy, dz = projectile["vel"]
+            delta = px - x, py - y
+            motion = dx - vx, dy - vy
+            t = -dot2(delta, motion) / max(EPS, dot2(motion, motion))
+            if not 0.035 <= t <= horizon or not z - 1.5 <= pz + dz * t <= z + height + 1.5:
+                continue
+            if math.hypot(delta[0] + motion[0] * t, delta[1] + motion[1] * t) > radius + speed * t * 1.4:
+                continue
+            end = px + dx * t, py + dy * t, pz + dz * t
+            if self.arena.shot_clear(projectile["pos"], end):
+                shots.append((t, end, dx, dy))
+        if not shots:
+            return heading
+        shots = sorted(shots)[:8]
+        acceleration = float(self.cfg.get("mech", {}).get("ground_accel", 58.5))
+        start = math.atan2(heading[1], heading[0])
+        best_cost = math.inf
+        best = heading
+        for offset in (0.0, 0.42, -0.42, 0.84, -0.84, 1.28, -1.28, 1.78, -1.78):
+            angle = start + offset
+            candidate = math.cos(angle), math.sin(angle)
+            if urgent and dot2(candidate, zone_vector) < min(0.35, dot2(heading, zone_vector)) - 0.06:
+                continue
+            if offset and not self.arena.direction_clear(me["pos"], angle, radius, height):
+                continue
+            dvx, dvy = candidate[0] * speed - vx, candidate[1] * speed - vy
+            ramp = math.hypot(dvx, dvy) / acceleration
+            cost = 0.31 * (1.0 - math.cos(offset))
+            for t, point, dx, dy in shots:
+                elapsed = min(t, ramp)
+                # Integrate acceleration until the commanded velocity is reached.
+                push = t - elapsed + 0.5 * elapsed * elapsed / max(EPS, ramp)
+                rx = point[0] - x - vx * t - dvx * push
+                ry = point[1] - y - vy * t - dvy * push
+                wx = dx - vx - dvx * elapsed / max(EPS, ramp)
+                wy = dy - vy - dvy * elapsed / max(EPS, ramp)
+                miss = abs(rx * wy - ry * wx) / max(EPS, math.hypot(wx, wy))
+                risk = clamp((radius + 0.65 - miss) / 1.55, 0.0, 1.0)
+                cost += risk * (1.0 - 0.55 * t)
+            if cost < best_cost:
+                best_cost, best = cost, candidate
+        return best
+
     def _threat_vector(self, obs, enemies):
         pos = obs["self"]["pos"]
         hp_fraction = obs["self"]["hp"] / max(1.0, obs["self"]["max_hp"])
@@ -882,7 +942,6 @@ class RoyaleBot:
         )
 
         move_scale = 1.0 if (threatened or urgent or stuck) and farm is None else objective_speed
-        move = [steered[0] * move_scale, steered[1] * move_scale]
         energy = float(me["energy"])
         if urgent or stuck:
             boost = (urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0)
@@ -894,6 +953,9 @@ class RoyaleBot:
             close_enemies = sum(distance2(pos, enemy["pos"]) < 110.0 for enemy in enemies)
             needs_escape = close_enemies > 1 or now < self.damage_until
             boost = needs_escape and energy > (36.0 if self.escape_boost else 65.0)
+        if projectile_danger and me["grounded"] and not stuck:
+            steered = self._steer_around_shots(obs, steered, zone_vector, urgent, boost)
+        move = [steered[0] * move_scale, steered[1] * move_scale]
         self.escape_boost = boost
         jump = bool(me["grounded"] and stuck and now - self.last_jump > 1.15)
         if jump:
