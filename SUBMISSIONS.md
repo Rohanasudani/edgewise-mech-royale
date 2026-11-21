@@ -16,6 +16,7 @@ The repository must be public when Builders fetches a submission. After scoring,
 | `submission-10` | `d51fe62` | 2026-11-21 1:06 PM ET | Stay grounded while dodging, preserve boost energy, and prioritize urgent zone movement. | 3.25 | Passed and scored | Receipt `BB-FB96DB1B`; selected as best entry |
 | `submission-11` | `eb5aff3` | 2026-11-21 1:15 PM ET | Compare reachable ground movement against multiple incoming shots to avoid crossfire. | 3.48 | Passed and scored | Receipt `BB-0289A4D0`; selected as best entry |
 | `submission-12` | `4aa5d58` | 2026-11-21 5:03 PM ET | Route around the zone's obstacles, build a second-weapon loadout, and press exposed opponents. | 4.40 | Passed and scored | Receipt `BB-2CC8566A`; selected as best entry |
+| `submission-13` | `7499a87` | 2026-11-21 5:20 PM ET | Jet out of disconnected terrain and prioritize targets the current loadout can finish quickly. | 4.46 | Passed and scored | Receipt `BB-8582EFD2`; selected as best entry |
 
 ## Candidate checklist
 
