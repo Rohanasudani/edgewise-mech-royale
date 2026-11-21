@@ -2,6 +2,13 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.3.0 - 2026-11-20
+
+- Restore the active return-fire behavior from 0.1 after the disengagement experiment scored poorly.
+- Index safe interior points and clearance for building and stadium roofs.
+- Commit to reachable jet-assisted roof climbs when pressured and safely inside the zone.
+- Reserve enough energy to complete climbs and apply timeouts and cooldowns to failed attempts.
+
 ## 0.2.0 - 2026-11-20
 
 - Add persistent disengagement when damaged below 72% health.

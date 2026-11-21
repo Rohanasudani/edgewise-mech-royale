@@ -26,34 +26,31 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(x, 0.6)
         self.assertAlmostEqual(y, 0.8)
 
-    def test_combat_policy_disengages_until_repaired(self):
-        bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
-        bot.damage_until = 13.2
-        bot.attacker = 5
-        bot.disengaging = False
-        target = {"id": 5, "kind": "mech", "pos": [80, 0, 0], "vel": [0, 0, 0]}
-        obs = {"t": 10.0, "alive": 12, "self": {"pos": [0, 0, 0], "hp": 900, "max_hp": 1400}}
-        engage, escape_fire, healing = bot._combat_policy(obs, target, 80.0)
-        self.assertTrue(healing)
-        self.assertFalse(engage)
-        self.assertFalse(escape_fire)
+    def test_ring_centroid_and_closest_boundary_point(self):
+        square = [10, 10, 30, 10, 30, 30, 10, 30]
+        self.assertEqual(BOT.ring_centroid(square), (20.0, 20.0))
+        self.assertEqual(BOT.closest_point_on_ring(0, 20, square), (10.0, 20.0))
 
-        obs["self"]["hp"] = 1300
-        engage, escape_fire, healing = bot._combat_policy(obs, target, 80.0)
-        self.assertFalse(healing)
-        self.assertTrue(engage)
-
-    def test_combat_policy_allows_close_escape_fire(self):
-        bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
-        bot.damage_until = 13.2
-        bot.attacker = 5
-        bot.disengaging = True
-        target = {"id": 5, "kind": "mech", "pos": [25, 0, 0], "vel": [0, 0, 0]}
-        obs = {"t": 10.0, "alive": 12, "self": {"pos": [0, 0, 0], "hp": 700, "max_hp": 1400}}
-        engage, escape_fire, healing = bot._combat_policy(obs, target, 25.0)
-        self.assertTrue(healing)
-        self.assertTrue(engage)
-        self.assertTrue(escape_fire)
+    def test_escape_roof_selects_reachable_interior_target(self):
+        arena = BOT.Arena.__new__(BOT.Arena)
+        arena.ok = True
+        arena.CELL = 30.0
+        arena.max_step = 1.2
+        arena.prisms = [{
+            "kind": "building",
+            "base": 0.0,
+            "top": 12.0,
+            "ring": [10, 10, 30, 10, 30, 30, 10, 30],
+            "holes": [],
+            "bbox": (10, 10, 30, 30),
+            "interior": (20.0, 20.0),
+            "clearance": 10.0,
+        }]
+        arena.cells = {(0, 0): [0], (1, 0): [0], (0, 1): [0], (1, 1): [0]}
+        goal = arena.escape_roof([0, 20, 0], 100.0, 2.5, (0.0, 0.0, 200.0))
+        self.assertIsNotNone(goal)
+        self.assertEqual(goal["top"], 12.0)
+        self.assertTrue(BOT.point_in_ring(goal["target"][0], goal["target"][1], arena.prisms[0]["ring"]))
 
 
 if __name__ == "__main__":

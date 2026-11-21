@@ -88,6 +88,52 @@ def near_ring_edge(x, y, ring, radius_sq):
     return False
 
 
+def ring_edge_distance_sq(x, y, ring):
+    """Squared distance from a point to the closest polygon edge."""
+    best = float("inf")
+    j = len(ring) - 2
+    for i in range(0, len(ring), 2):
+        best = min(best, segment_distance_sq(x, y, ring[j], ring[j + 1], ring[i], ring[i + 1]))
+        j = i
+    return best
+
+
+def closest_point_on_ring(x, y, ring):
+    """Return the point on a polygon boundary closest to ``(x, y)``."""
+    best_distance = float("inf")
+    best = (ring[0], ring[1])
+    j = len(ring) - 2
+    for i in range(0, len(ring), 2):
+        ax, ay, bx, by = ring[j], ring[j + 1], ring[i], ring[i + 1]
+        dx, dy = bx - ax, by - ay
+        denom = dx * dx + dy * dy
+        t = clamp(((x - ax) * dx + (y - ay) * dy) / denom, 0.0, 1.0) if denom > EPS else 0.0
+        point = (ax + t * dx, ay + t * dy)
+        distance = (x - point[0]) ** 2 + (y - point[1]) ** 2
+        if distance < best_distance:
+            best_distance, best = distance, point
+        j = i
+    return best
+
+
+def ring_centroid(ring):
+    """Area centroid with a vertex-average fallback for degenerate rings."""
+    twice_area = 0.0
+    cx = 0.0
+    cy = 0.0
+    j = len(ring) - 2
+    for i in range(0, len(ring), 2):
+        cross = ring[j] * ring[i + 1] - ring[i] * ring[j + 1]
+        twice_area += cross
+        cx += (ring[j] + ring[i]) * cross
+        cy += (ring[j + 1] + ring[i + 1]) * cross
+        j = i
+    if abs(twice_area) < EPS:
+        count = len(ring) // 2
+        return (sum(ring[0::2]) / count, sum(ring[1::2]) / count)
+    return (cx / (3.0 * twice_area), cy / (3.0 * twice_area))
+
+
 class Arena:
     """Small spatial index used for local steering, not global pathfinding."""
 
@@ -118,12 +164,14 @@ class Arena:
                     continue
                 xs, ys = ring[0::2], ring[1::2]
                 prism = {
+                    "kind": item.get("kind", "building"),
                     "base": float(item["base"]),
                     "top": float(item["top"]),
                     "ring": ring,
                     "holes": item.get("holes") or [],
                     "bbox": (min(xs), min(ys), max(xs), max(ys)),
                 }
+                prism["interior"], prism["clearance"] = self._interior_point(prism)
                 index = len(self.prisms)
                 self.prisms.append(prism)
                 min_x, min_y, max_x, max_y = prism["bbox"]
@@ -155,6 +203,75 @@ class Arena:
 
     def _nearby(self, x, y):
         return self.cells.get((math.floor(x / self.CELL), math.floor(y / self.CELL)), ())
+
+    @staticmethod
+    def _interior_point(prism):
+        """Find a roof point with useful clearance from outer and hole edges."""
+        min_x, min_y, max_x, max_y = prism["bbox"]
+        candidates = [ring_centroid(prism["ring"]), ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)]
+        for ix in range(1, 7):
+            for iy in range(1, 7):
+                candidates.append((min_x + (max_x - min_x) * ix / 7.0, min_y + (max_y - min_y) * iy / 7.0))
+        best = candidates[0]
+        best_clearance_sq = -1.0
+        for x, y in candidates:
+            if not point_in_ring(x, y, prism["ring"]):
+                continue
+            if any(point_in_ring(x, y, hole) for hole in prism["holes"]):
+                continue
+            clearance_sq = ring_edge_distance_sq(x, y, prism["ring"])
+            for hole in prism["holes"]:
+                clearance_sq = min(clearance_sq, ring_edge_distance_sq(x, y, hole))
+            if clearance_sq > best_clearance_sq:
+                best_clearance_sq = clearance_sq
+                best = (x, y)
+        return best, math.sqrt(max(0.0, best_clearance_sq))
+
+    def escape_roof(self, pos, energy, radius, zone, height=9.0):
+        """Choose a reachable nearby roof and an approach point just inside its edge."""
+        if not self.ok:
+            return None
+        max_rise = min(40.0, max(0.0, (energy - 18.0) * 0.52))
+        if max_rise < 7.0:
+            return None
+        cell_x, cell_y = math.floor(pos[0] / self.CELL), math.floor(pos[1] / self.CELL)
+        candidates = set()
+        for gx in range(cell_x - 2, cell_x + 3):
+            for gy in range(cell_y - 2, cell_y + 3):
+                candidates.update(self.cells.get((gx, gy), ()))
+
+        best_score = float("inf")
+        best = None
+        for index in candidates:
+            prism = self.prisms[index]
+            if prism["kind"] not in {"building", "stadium"} or prism["clearance"] < radius + 0.8:
+                continue
+            rise = prism["top"] - pos[2]
+            if rise < 6.0 or rise > max_rise:
+                continue
+            inner = prism["interior"]
+            edge = closest_point_on_ring(pos[0], pos[1], prism["ring"])
+            inward = unit((inner[0] - edge[0], inner[1] - edge[1]))
+            inset = min(distance2(edge, inner), max(4.0, radius + 1.5))
+            target = (edge[0] + inward[0] * inset, edge[1] + inward[1] * inset)
+            valid_target = point_in_ring(target[0], target[1], prism["ring"]) and not any(
+                point_in_ring(target[0], target[1], hole) for hole in prism["holes"]
+            )
+            if not valid_target or ring_edge_distance_sq(target[0], target[1], prism["ring"]) < (radius + 0.35) ** 2:
+                target = inner
+            horizontal = distance2(pos, target)
+            if horizontal > 58.0:
+                continue
+            if self.blocked(target[0], target[1], prism["top"], radius, height):
+                continue
+            zone_margin = zone[2] - distance2(target, zone[:2])
+            if zone_margin < radius + 7.0:
+                continue
+            score = horizontal + rise * 0.48 - min(prism["clearance"], 10.0) * 0.22
+            if score < best_score:
+                best_score = score
+                best = {"target": target, "edge": edge, "top": prism["top"], "index": index}
+        return best
 
     def blocked(self, x, y, feet_z, radius, height):
         if not self.ok:
@@ -238,7 +355,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v2"
+    name = "edgewise-v3"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -253,7 +370,8 @@ class RoyaleBot:
         self.damage_bearing = None
         self.damage_until = -1.0
         self.attacker = None
-        self.disengaging = False
+        self.climb_goal = None
+        self.climb_cooldown = -1.0
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
         self.pickup_radius = float(self.cfg["loot"]["pickup_radius"])
 
@@ -383,36 +501,6 @@ class RoyaleBot:
             return value
         return min(enemies, key=score)
 
-    def _combat_policy(self, obs, target, closest):
-        """Decide whether fighting improves placement more than breaking contact.
-
-        Dealing damage delays health regeneration and gunfire advertises our
-        position.  Stay disengaged until mostly repaired, except when an enemy
-        is close enough that suppressive fire is necessary to escape.
-        """
-        me = obs["self"]
-        now = float(obs["t"])
-        hp_fraction = float(me["hp"]) / max(1.0, float(me["max_hp"]))
-        late_game = int(obs["alive"]) <= 4
-        recently_hit = now < self.damage_until + 3.0
-
-        if late_game or hp_fraction >= 0.90:
-            self.disengaging = False
-        elif hp_fraction < 0.50 or (hp_fraction < 0.72 and (recently_hit or closest < 130.0)):
-            self.disengaging = True
-
-        if target is None:
-            return False, False, self.disengaging
-
-        distance = distance2(me["pos"], target["pos"])
-        attacker_pressure = target["id"] == self.attacker and now < self.damage_until
-        escape_fire = self.disengaging and distance < 38.0
-        engage = late_game or escape_fire or (
-            not self.disengaging
-            and (distance < 88.0 or (attacker_pressure and distance < 135.0) or (target.get("charging") and distance < 150.0))
-        )
-        return engage, escape_fire, self.disengaging
-
     def _direct_aim(self, me, target, speed=None):
         muzzle = (me["pos"][0], me["pos"][1], me["pos"][2] + float(me["stats"].get("muzzle_height", 7.0)))
         target_pos = [target["pos"][0], target["pos"][1], target["pos"][2] + (1.75 if target["kind"] == "npc" else 4.5)]
@@ -442,7 +530,7 @@ class RoyaleBot:
             solution = [math.atan2(dy, dx), pitch]
         return solution
 
-    def _combat(self, obs, target, engage=True, escape_only=False):
+    def _combat(self, obs, target):
         me = obs["self"]
         fire = [False, False]
         slots = self._weapon_slots(me)
@@ -456,18 +544,10 @@ class RoyaleBot:
             return [self.scan_yaw, 0.0], fire, False
 
         distance = distance2(me["pos"], target["pos"])
-        if not engage:
-            # Still face the threat to protect front armor, but stay quiet and
-            # let the out-of-combat repair clock run.
-            aim = self._direct_aim(me, target)
-            gun = slots.get("gun")
-            reload_now = bool(gun and gun[1].get("reload", 0.0) <= 0.0 and gun[1].get("ammo", 12) <= 2)
-            return aim, fire, reload_now
-
         chosen_kind = "gun"
-        if not escape_only and "laser" in slots and distance <= float(slots["laser"][1]["stats"]["range"]):
+        if "laser" in slots and distance <= float(slots["laser"][1]["stats"]["range"]):
             chosen_kind = "laser"
-        if "mortar" in slots and 14.0 < distance < (85.0 if escape_only else 205.0):
+        if "mortar" in slots and 14.0 < distance < 205.0:
             chosen_kind = "mortar"
         if "lightning" in slots and distance <= float(slots["lightning"][1]["stats"]["range"]) * 0.95 and me["energy"] > 14.0:
             chosen_kind = "lightning"
@@ -499,21 +579,69 @@ class RoyaleBot:
                 fire[slot] = True
             else:
                 fire[slot] = False  # releasing the trigger fires the beam
-            if not escape_only and "gun" in slots and aligned:
+            if "gun" in slots and aligned:
                 fire[slots["gun"][0]] = True
         elif chosen_kind == "mortar":
             splash = float(weapon["stats"].get("splash_radius", 7.0))
             fire[slot] = aligned and cooldown <= 0.1 and distance > splash + 6.0
         elif chosen_kind == "lightning":
             fire[slot] = aligned and cooldown <= 0.1
-            if not escape_only and "gun" in slots and aligned:
+            if "gun" in slots and aligned:
                 fire[slots["gun"][0]] = True
         else:
-            fire[slot] = aligned and (not escape_only or distance < 30.0)
+            fire[slot] = aligned
 
         gun = slots.get("gun")
         reload_now = bool(gun and gun[1].get("reload", 0.0) <= 0.0 and gun[1].get("ammo", 12) <= 2 and not fire[gun[0]])
         return aim, fire, reload_now
+
+    def _climb_override(self, obs, threatened, current_margin, current_zone):
+        """Start or continue a short, committed jet climb onto a nearby roof."""
+        me = obs["self"]
+        pos = me["pos"]
+        now = float(obs["t"])
+        energy = float(me["energy"])
+
+        if self.climb_goal is not None:
+            goal = self.climb_goal
+            timed_out = now - goal["started"] > 7.0
+            unsafe = current_margin < 7.0 or energy < 9.0
+            if timed_out or unsafe:
+                self.climb_goal = None
+                self.climb_cooldown = now + 5.0
+            else:
+                target = goal["target"]
+                move = unit((target[0] - pos[0], target[1] - pos[1]))
+                roof_ready = pos[2] >= goal["top"] - self.arena.max_step + 0.15
+                at_wall = distance2(pos, goal["edge"]) <= float(me["stats"].get("radius", 2.5)) + 2.0
+                settled = roof_ready and distance2(pos, target) < max(3.0, float(me["stats"].get("radius", 2.5)) + 0.7)
+                if settled:
+                    self.climb_goal = None
+                    self.climb_cooldown = now + 4.0
+                    return None
+                return {
+                    "move": [move[0], move[1]],
+                    "boost": bool(not roof_ready and energy > 9.0),
+                    "jump": bool(me["grounded"] and at_wall and not roof_ready and now - self.last_jump > 0.9),
+                }
+
+        if not threatened or not me["grounded"] or now < self.climb_cooldown or current_margin < 16.0 or energy < 58.0:
+            return None
+        goal = self.arena.escape_roof(
+            pos,
+            energy,
+            float(me["stats"].get("radius", 2.5)),
+            current_zone,
+            float(me["stats"].get("height", 9.0)),
+        )
+        if goal is None:
+            self.climb_cooldown = now + 2.0
+            return None
+        goal["started"] = now
+        self.climb_goal = goal
+        move = unit((goal["target"][0] - pos[0], goal["target"][1] - pos[1]))
+        at_wall = distance2(pos, goal["edge"]) <= float(me["stats"].get("radius", 2.5)) + 2.0
+        return {"move": [move[0], move[1]], "boost": True, "jump": at_wall}
 
     def act(self, obs):
         me = obs["self"]
@@ -531,16 +659,15 @@ class RoyaleBot:
         threat, closest = self._threat_vector(obs, enemies)
         dodge, projectile_danger = self._projectile_dodge(obs)
         threatened = closest < 105.0 or now < self.damage_until or projectile_danger
-        engage, escape_fire, healing_mode = self._combat_policy(obs, target, closest)
 
         objective = zone_vector
         objective_speed = 0.40  # below the default footstep threshold when walking
         pickup = self._select_pickup(obs, enemies)
         pickup_distance = distance2(pos, pickup["pos"]) if pickup else 1e9
-        if pickup and pickup_distance < 58.0 and not threatened and not healing_mode and current_margin > 18.0:
+        if pickup and pickup_distance < 58.0 and not threatened and current_margin > 18.0:
             objective = unit((pickup["pos"][0] - pos[0], pickup["pos"][1] - pos[1]))
             objective_speed = 0.72
-        if not threatened and not urgent and not healing_mode and pickup is None:
+        if not threatened and not urgent and pickup is None:
             cubes = [cube for cube in obs.get("cubes", []) if distance2(pos, cube["pos"]) < 32.0]
             if cubes:
                 cube = min(cubes, key=lambda item: distance2(pos, item["pos"]))
@@ -554,9 +681,8 @@ class RoyaleBot:
                     objective_speed = 0.75
 
         desired = [objective[0] * (1.6 if urgent else 0.9), objective[1] * (1.6 if urgent else 0.9)]
-        threat_weight = 2.35 if healing_mode else 1.75
-        desired[0] += threat[0] * threat_weight + dodge[0] * 2.8
-        desired[1] += threat[1] * threat_weight + dodge[1] * 2.8
+        desired[0] += threat[0] * 1.75 + dodge[0] * 2.8
+        desired[1] += threat[1] * 1.75 + dodge[1] * 2.8
         desired = unit(desired, fallback=objective)
 
         commanded_before = length2(self.last_move)
@@ -579,16 +705,19 @@ class RoyaleBot:
             current_zone,
         )
 
-        quiet_heal_speed = 0.32
-        move_scale = 1.0 if threatened or urgent or stuck else (quiet_heal_speed if healing_mode else objective_speed)
+        move_scale = 1.0 if threatened or urgent or stuck else objective_speed
         move = [steered[0] * move_scale, steered[1] * move_scale]
         energy = float(me["energy"])
-        boost = bool((urgent and energy > 22.0) or (threatened and energy > (32.0 if healing_mode else 46.0)) or (stuck and energy > 25.0))
+        boost = bool((urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0))
         jump = bool(me["grounded"] and (projectile_danger or stuck or (closest < 32.0 and now < self.damage_until)) and now - self.last_jump > 1.15)
+
+        climb = self._climb_override(obs, threatened, current_margin, current_zone)
+        if climb is not None:
+            move, boost, jump = climb["move"], climb["boost"], climb["jump"]
         if jump:
             self.last_jump = now
 
-        aim, fire, reload_now = self._combat(obs, target, engage=engage, escape_only=escape_fire)
+        aim, fire, reload_now = self._combat(obs, target)
         action = {"move": move, "boost": boost, "jump": jump, "aim": aim, "fire": fire}
         if reload_now:
             action["reload"] = True

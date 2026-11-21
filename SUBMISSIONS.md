@@ -5,6 +5,7 @@ Keep every submitted commit public until the event results are published. The Bu
 | Tag | Commit | Submitted (ET) | Hypothesis | Practice score | Build/check | Notes |
 | --- | --- | --- | --- | ---: | --- | --- |
 | `submission-01` | `9719bc6` | 2026-11-20 8:12 PM ET | Survival-first edge play beats the 1.15 starter baseline. | 1.56 | Passed and scored | Receipt `BB-DB770448`; +35.7% over baseline; selected as best/final entry |
+| `submission-02` | `eceadfc` | 2026-11-20 9:03 PM ET | Breaking contact below 72% HP creates enough quiet time to regenerate. | 0.46 | Passed and scored | Receipt `BB-E5AF82EF`; rejected hypothesis; `submission-01` remains selected |
 
 ## Candidate checklist
 
