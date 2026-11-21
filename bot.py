@@ -238,7 +238,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v1"
+    name = "edgewise-v2"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -253,6 +253,7 @@ class RoyaleBot:
         self.damage_bearing = None
         self.damage_until = -1.0
         self.attacker = None
+        self.disengaging = False
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
         self.pickup_radius = float(self.cfg["loot"]["pickup_radius"])
 
@@ -382,6 +383,36 @@ class RoyaleBot:
             return value
         return min(enemies, key=score)
 
+    def _combat_policy(self, obs, target, closest):
+        """Decide whether fighting improves placement more than breaking contact.
+
+        Dealing damage delays health regeneration and gunfire advertises our
+        position.  Stay disengaged until mostly repaired, except when an enemy
+        is close enough that suppressive fire is necessary to escape.
+        """
+        me = obs["self"]
+        now = float(obs["t"])
+        hp_fraction = float(me["hp"]) / max(1.0, float(me["max_hp"]))
+        late_game = int(obs["alive"]) <= 4
+        recently_hit = now < self.damage_until + 3.0
+
+        if late_game or hp_fraction >= 0.90:
+            self.disengaging = False
+        elif hp_fraction < 0.50 or (hp_fraction < 0.72 and (recently_hit or closest < 130.0)):
+            self.disengaging = True
+
+        if target is None:
+            return False, False, self.disengaging
+
+        distance = distance2(me["pos"], target["pos"])
+        attacker_pressure = target["id"] == self.attacker and now < self.damage_until
+        escape_fire = self.disengaging and distance < 38.0
+        engage = late_game or escape_fire or (
+            not self.disengaging
+            and (distance < 88.0 or (attacker_pressure and distance < 135.0) or (target.get("charging") and distance < 150.0))
+        )
+        return engage, escape_fire, self.disengaging
+
     def _direct_aim(self, me, target, speed=None):
         muzzle = (me["pos"][0], me["pos"][1], me["pos"][2] + float(me["stats"].get("muzzle_height", 7.0)))
         target_pos = [target["pos"][0], target["pos"][1], target["pos"][2] + (1.75 if target["kind"] == "npc" else 4.5)]
@@ -411,7 +442,7 @@ class RoyaleBot:
             solution = [math.atan2(dy, dx), pitch]
         return solution
 
-    def _combat(self, obs, target):
+    def _combat(self, obs, target, engage=True, escape_only=False):
         me = obs["self"]
         fire = [False, False]
         slots = self._weapon_slots(me)
@@ -425,10 +456,18 @@ class RoyaleBot:
             return [self.scan_yaw, 0.0], fire, False
 
         distance = distance2(me["pos"], target["pos"])
+        if not engage:
+            # Still face the threat to protect front armor, but stay quiet and
+            # let the out-of-combat repair clock run.
+            aim = self._direct_aim(me, target)
+            gun = slots.get("gun")
+            reload_now = bool(gun and gun[1].get("reload", 0.0) <= 0.0 and gun[1].get("ammo", 12) <= 2)
+            return aim, fire, reload_now
+
         chosen_kind = "gun"
-        if "laser" in slots and distance <= float(slots["laser"][1]["stats"]["range"]):
+        if not escape_only and "laser" in slots and distance <= float(slots["laser"][1]["stats"]["range"]):
             chosen_kind = "laser"
-        if "mortar" in slots and 14.0 < distance < 205.0:
+        if "mortar" in slots and 14.0 < distance < (85.0 if escape_only else 205.0):
             chosen_kind = "mortar"
         if "lightning" in slots and distance <= float(slots["lightning"][1]["stats"]["range"]) * 0.95 and me["energy"] > 14.0:
             chosen_kind = "lightning"
@@ -460,18 +499,17 @@ class RoyaleBot:
                 fire[slot] = True
             else:
                 fire[slot] = False  # releasing the trigger fires the beam
-            # Gun fire shares a direct aim with the laser and is essentially free pressure.
-            if "gun" in slots and aligned:
+            if not escape_only and "gun" in slots and aligned:
                 fire[slots["gun"][0]] = True
         elif chosen_kind == "mortar":
             splash = float(weapon["stats"].get("splash_radius", 7.0))
             fire[slot] = aligned and cooldown <= 0.1 and distance > splash + 6.0
         elif chosen_kind == "lightning":
             fire[slot] = aligned and cooldown <= 0.1
-            if "gun" in slots and aligned:
+            if not escape_only and "gun" in slots and aligned:
                 fire[slots["gun"][0]] = True
         else:
-            fire[slot] = aligned
+            fire[slot] = aligned and (not escape_only or distance < 30.0)
 
         gun = slots.get("gun")
         reload_now = bool(gun and gun[1].get("reload", 0.0) <= 0.0 and gun[1].get("ammo", 12) <= 2 and not fire[gun[0]])
@@ -493,15 +531,16 @@ class RoyaleBot:
         threat, closest = self._threat_vector(obs, enemies)
         dodge, projectile_danger = self._projectile_dodge(obs)
         threatened = closest < 105.0 or now < self.damage_until or projectile_danger
+        engage, escape_fire, healing_mode = self._combat_policy(obs, target, closest)
 
         objective = zone_vector
         objective_speed = 0.40  # below the default footstep threshold when walking
         pickup = self._select_pickup(obs, enemies)
         pickup_distance = distance2(pos, pickup["pos"]) if pickup else 1e9
-        if pickup and pickup_distance < 58.0 and not threatened and current_margin > 18.0:
+        if pickup and pickup_distance < 58.0 and not threatened and not healing_mode and current_margin > 18.0:
             objective = unit((pickup["pos"][0] - pos[0], pickup["pos"][1] - pos[1]))
             objective_speed = 0.72
-        if not threatened and not urgent and pickup is None:
+        if not threatened and not urgent and not healing_mode and pickup is None:
             cubes = [cube for cube in obs.get("cubes", []) if distance2(pos, cube["pos"]) < 32.0]
             if cubes:
                 cube = min(cubes, key=lambda item: distance2(pos, item["pos"]))
@@ -515,8 +554,9 @@ class RoyaleBot:
                     objective_speed = 0.75
 
         desired = [objective[0] * (1.6 if urgent else 0.9), objective[1] * (1.6 if urgent else 0.9)]
-        desired[0] += threat[0] * 1.75 + dodge[0] * 2.8
-        desired[1] += threat[1] * 1.75 + dodge[1] * 2.8
+        threat_weight = 2.35 if healing_mode else 1.75
+        desired[0] += threat[0] * threat_weight + dodge[0] * 2.8
+        desired[1] += threat[1] * threat_weight + dodge[1] * 2.8
         desired = unit(desired, fallback=objective)
 
         commanded_before = length2(self.last_move)
@@ -539,15 +579,16 @@ class RoyaleBot:
             current_zone,
         )
 
-        move_scale = 1.0 if threatened or urgent or stuck else objective_speed
+        quiet_heal_speed = 0.32
+        move_scale = 1.0 if threatened or urgent or stuck else (quiet_heal_speed if healing_mode else objective_speed)
         move = [steered[0] * move_scale, steered[1] * move_scale]
         energy = float(me["energy"])
-        boost = bool((urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0))
+        boost = bool((urgent and energy > 22.0) or (threatened and energy > (32.0 if healing_mode else 46.0)) or (stuck and energy > 25.0))
         jump = bool(me["grounded"] and (projectile_danger or stuck or (closest < 32.0 and now < self.damage_until)) and now - self.last_jump > 1.15)
         if jump:
             self.last_jump = now
 
-        aim, fire, reload_now = self._combat(obs, target)
+        aim, fire, reload_now = self._combat(obs, target, engage=engage, escape_only=escape_fire)
         action = {"move": move, "boost": boost, "jump": jump, "aim": aim, "fire": fire}
         if reload_now:
             action["reload"] = True
