@@ -100,7 +100,6 @@ class Arena:
         self.prisms = []
         self.cells = defaultdict(list)
         self.heights = None
-        self.terrain = None
         self.max_step = float(hello["config"]["mech"]["step_up"])
         self.max_slope = math.tan(math.radians(float(hello["config"]["mech"]["max_slope_deg"])))
         try:
@@ -108,10 +107,16 @@ class Arena:
             with open(os.path.join(map_dir, "v2", "world.json"), "r", encoding="utf-8") as handle:
                 world = json.load(handle)
             self.bounds = world["bounds"]
-            self.terrain = world["terrain"]
+            terrain = world["terrain"]
+            self.origin_x = float(terrain["minX"])
+            self.origin_y = float(terrain["minY"])
+            self.inv_step = 1.0 / float(terrain["step"])
+            self.width = int(terrain["nx"])
+            self.rows = int(terrain["ny"])
+            self.height_scale = float(terrain.get("scale", 0.01))
             raw = array("h")
-            with open(os.path.join(map_dir, "v2", self.terrain["file"]), "rb") as handle:
-                raw.fromfile(handle, int(self.terrain["nx"]) * int(self.terrain["ny"]))
+            with open(os.path.join(map_dir, "v2", terrain["file"]), "rb") as handle:
+                raw.fromfile(handle, self.width * self.rows)
             if sys.byteorder != "little":
                 raw.byteswap()
             self.heights = raw
@@ -140,21 +145,22 @@ class Arena:
     def ground(self, x, y):
         if not self.ok:
             return 0.0
-        terrain = self.terrain
-        fx = (x - float(terrain["minX"])) / float(terrain["step"])
-        fy = (y - float(terrain["minY"])) / float(terrain["step"])
-        nx, ny = int(terrain["nx"]), int(terrain["ny"])
-        i = int(math.floor(clamp(fx, 0.0, nx - 1.001)))
-        j = int(math.floor(clamp(fy, 0.0, ny - 1.001)))
-        tx, ty = fx - i, fy - j
-        tx, ty = clamp(tx, 0.0, 1.0), clamp(ty, 0.0, 1.0)
+        fx = (x - self.origin_x) * self.inv_step
+        fy = (y - self.origin_y) * self.inv_step
+        nx = self.width
+        if 0.0 <= fx < nx - 1 and 0.0 <= fy < self.rows - 1:
+            i, j = int(fx), int(fy)
+            tx, ty = fx - i, fy - j
+        else:
+            i, j = int(clamp(fx, 0.0, nx - 1.001)), int(clamp(fy, 0.0, self.rows - 1.001))
+            tx, ty = clamp(fx - i, 0.0, 1.0), clamp(fy - j, 0.0, 1.0)
         p = j * nx + i
         h00 = self.heights[p]
         h10 = self.heights[p + 1]
         h01 = self.heights[p + nx]
         h11 = self.heights[p + nx + 1]
         value = h00 * (1.0 - tx) * (1.0 - ty) + h10 * tx * (1.0 - ty) + h01 * (1.0 - tx) * ty + h11 * tx * ty
-        return value * float(terrain.get("scale", 0.01))
+        return value * self.height_scale
 
     def _nearby(self, x, y):
         return self.cells.get((math.floor(x / self.CELL), math.floor(y / self.CELL)), ())
@@ -867,6 +873,8 @@ class RoyaleBot:
         splash = float(mortar["splash_radius"])
         dodge = [0.0, 0.0]
         nearest_hazard = None
+        hazards = []
+        self.bullet_clearance = {}
         for projectile in obs.get("projectiles", []):
             origin = projectile["pos"]
             drift = projectile["vel"]
@@ -883,12 +891,18 @@ class RoyaleBot:
                     feet = pos[2] + (0.0 if me["grounded"] else velocity[2] * approach)
                     if length2(miss) < radius + 1.0 and feet - 0.7 <= z <= feet + height + 0.7:
                         endpoint = (origin[0] + drift[0] * approach, origin[1] + drift[1] * approach, z)
-                        if is_mortar or self.arena.shot_clear(origin, endpoint):
-                            direct = (approach, miss, 1.0)
+                        direct = (approach, miss, 1.0)
             impact = self._mortar_impact(me, origin, drift, gravity, splash + radius + 0.9) if is_mortar else None
             hazard = min((risk for risk in (direct, impact) if risk is not None), default=None)
             if hazard is None:
                 continue
+            hazards.append((hazard, relative_vel, None if is_mortar else projectile, endpoint if direct else None))
+        for hazard, relative_vel, projectile, endpoint in sorted(hazards, key=lambda hit: hit[0][0])[:10]:
+            if projectile is not None:
+                clear = self.arena.shot_clear(projectile["pos"], endpoint)
+                self.bullet_clearance[id(projectile)] = clear
+                if not clear:
+                    continue
             approach, miss, severity = hazard
             perpendicular = unit((-relative_vel[1] * self.turn_sign, relative_vel[0] * self.turn_sign))
             if dot2(perpendicular, self.last_move) < -0.1:
@@ -953,11 +967,21 @@ class RoyaleBot:
             if math.hypot(delta[0] + motion[0] * t, delta[1] + motion[1] * t) > radius + speed * t * 1.4:
                 continue
             end = px + dx * t, py + dy * t, pz + dz * t
-            if self.arena.shot_clear(projectile["pos"], end):
-                shots.append((t, end, dx, dy))
+            shots.append((t, end, dx, dy, projectile))
         if not shots:
             return heading
-        shots = sorted(shots)[:8]
+        incoming = []
+        clearance = getattr(self, "bullet_clearance", {})
+        for t, point, dx, dy, projectile in sorted(shots, key=lambda shot: shot[0])[:10]:
+            clear = clearance.get(id(projectile))
+            if clear is None:
+                clear = self.arena.shot_clear(projectile["pos"], point)
+            if clear:
+                incoming.append((t, point, dx, dy))
+                if len(incoming) == 8:
+                    break
+        if not incoming:
+            return heading
         acceleration = float(self.cfg.get("mech", {}).get("ground_accel", 58.5))
         start = math.atan2(heading[1], heading[0])
         best_cost = math.inf
@@ -972,7 +996,7 @@ class RoyaleBot:
             dvx, dvy = candidate[0] * speed - vx, candidate[1] * speed - vy
             ramp = math.hypot(dvx, dvy) / acceleration
             cost = 0.31 * (1.0 - math.cos(offset))
-            for t, point, dx, dy in shots:
+            for t, point, dx, dy in incoming:
                 elapsed = min(t, ramp)
                 # Integrate acceleration until the commanded velocity is reached.
                 push = t - elapsed + 0.5 * elapsed * elapsed / max(EPS, ramp)

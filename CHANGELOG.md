@@ -6,6 +6,7 @@ All notable bot changes are recorded here. Practice submissions also belong in `
 
 - Plan jet crossings between disconnected walking regions when the zone is closing.
 - Rank exposed opponents by estimated time to finish, current weapon effectiveness, and recent damage received.
+- Reuse projectile clearance checks and prioritize the earliest shots under sustained crossfire.
 
 ## 0.12.0 - 2026-11-21
 
