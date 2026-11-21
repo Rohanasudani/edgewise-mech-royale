@@ -1,6 +1,6 @@
 # Practice submission ledger
 
-Keep every submitted commit public until the event results are published. The Builders scorer accepts only one active entry per team, allows four entries per rolling hour, and counts rejected entries against that limit.
+The repository must be public when Builders fetches a submission. After scoring, Builders keeps a copy of the scored commit for the final. The scorer accepts only one active entry per team, allows four entries per rolling hour, and counts rejected entries against that limit.
 
 | Tag | Commit | Submitted (ET) | Hypothesis | Practice score | Build/check | Notes |
 | --- | --- | --- | --- | ---: | --- | --- |
@@ -14,6 +14,7 @@ Keep every submitted commit public until the event results are published. The Bu
 | `submission-08` | `b921074` | 2026-11-21 12:17 PM ET | Avoid incoming fire by predicting the shot path and ground impact. | 2.56 | Passed and scored | Receipt `BB-539F0286`; selected as best entry |
 | `submission-09` | `6ab78fc` | 2026-11-21 12:47 PM ET | Finish favorable fights and turn safe cube pickups into upgrades. | 2.60 | Passed and scored | Receipt `BB-1A3D6C8E`; selected as best entry |
 | `submission-10` | `d51fe62` | 2026-11-21 1:06 PM ET | Stay grounded while dodging, preserve boost energy, and prioritize urgent zone movement. | 3.25 | Passed and scored | Receipt `BB-FB96DB1B`; selected as best entry |
+| `submission-11` | `eb5aff3` | 2026-11-21 1:15 PM ET | Compare reachable ground movement against multiple incoming shots to avoid crossfire. | 3.48 | Passed and scored | Receipt `BB-0289A4D0`; selected as best entry |
 
 ## Candidate checklist
 
