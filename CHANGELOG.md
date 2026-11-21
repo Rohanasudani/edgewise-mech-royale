@@ -2,6 +2,12 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.5.0 - 2026-11-21
+
+- Return to the 0.1 survival and steering policy.
+- Fall back to the gun while the mortar cools and account for projectile travel, barrel offset, and target size.
+- Favor wounded opponents and acquire a second weapon earlier when safe.
+
 ## 0.4.1
 
 - Check ground clearance along cover routes and follow waypoints around obstacles.
