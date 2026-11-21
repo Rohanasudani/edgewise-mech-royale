@@ -2,6 +2,12 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.7.0 - 2026-11-21
+
+- Plan bounded ground routes to early weapon pickups, including detours around arena obstacles.
+- Remember briefly obscured pickups and reserve boost energy while approaching.
+- Yield to incoming projectiles, urgent zone movement, and unsafe approaches.
+
 ## 0.6.0 - 2026-11-21
 
 - Check lead-corrected gun lines, beams, and mortar arcs against buildings and terrain before firing.

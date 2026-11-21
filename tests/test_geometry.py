@@ -27,6 +27,64 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(y, 0.8)
 
 
+class OpeningTests(unittest.TestCase):
+    def setUp(self):
+        self.arena = BOT.Arena.__new__(BOT.Arena)
+        self.arena.ok = True
+        self.arena.bounds = None
+        self.arena.max_step = 1.2
+        self.arena.max_slope = math.tan(math.radians(50))
+        self.arena.ground = lambda x, y: 0.0
+        self.arena.prisms = []
+        self.arena.cells = {}
+        self.bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
+        self.bot.arena = self.arena
+        self.bot.pickup_radius = 4.0
+        self.bot.opening_pickups = {}
+        self.bot.opening_plan = None
+        self.bot.opening_retry_at = 0.0
+        self.bot.damage_until = -1.0
+        self.bot.damage_bearing = None
+        self.me = {
+            "pos": [0, 0, 0], "hp": 1400, "max_hp": 1400, "grounded": True, "stats": {},
+            "energy": 100, "weapons": [{"kind": "gun"}, None],
+        }
+        self.pickup = {"id": 8001, "kind": "laser", "pos": [38.0, 0.0, 0.0]}
+        self.obs = {
+            "t": 0.0, "self": self.me, "pickups": [self.pickup], "events": [],
+            "zone": {"center": [0, 0], "radius": 300.0},
+        }
+
+    def test_routes_around_a_solid_wall(self):
+        self.arena.prisms = [{
+            "ring": [12, -7, 22, -7, 22, 7, 12, 7], "holes": [],
+            "bbox": (12, -7, 22, 7), "base": 0.0, "top": 13.0,
+        }]
+        self.arena.cells = {(0, -1): [0], (0, 0): [0]}
+        route = self.arena.pickup_route(self.me["pos"], self.pickup["pos"], 2.9, 9.0)
+        self.assertIsNotNone(route)
+        self.assertGreater(len(route), 1)
+        self.assertEqual(route[-1], (38.0, 0.0))
+        for start, end in zip((self.me["pos"], *route[:-1]), route):
+            self.assertTrue(self.arena.walkable_leg(start, end, 2.9, 9.0))
+
+    def test_remembers_pickup_and_yields_to_projectile(self):
+        move, boost, take = self.bot._opening_move(self.obs, [], False, False)
+        self.assertEqual(move, [1.0, 0.0])
+        self.assertTrue(boost)
+        self.assertIsNone(take)
+        self.obs.update(t=0.2, pickups=[])
+        self.assertIsNone(self.bot._opening_move(self.obs, [], True, False))
+        self.me["pos"] = [35.0, 0.0, 0.0]
+        self.assertEqual(self.bot._opening_move(self.obs, [], False, False)[2], self.pickup)
+        self.obs["events"] = [{"type": "take_failed", "id": 8001, "reason": "gone"}]
+        self.assertIsNone(self.bot._opening_move(self.obs, [], False, False))
+
+    def test_skips_weapon_beside_enemy(self):
+        enemy = {"pos": [48.0, 0.0, 0.0]}
+        self.assertIsNone(self.bot._opening_move(self.obs, [enemy], False, False))
+
+
 class CombatTests(unittest.TestCase):
     def setUp(self):
         self.bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
