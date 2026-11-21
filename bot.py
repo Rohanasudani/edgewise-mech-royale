@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from array import array
 from collections import defaultdict
-from heapq import heappop, heappush
 import json
 import math
 import os
@@ -90,10 +89,9 @@ def near_ring_edge(x, y, ring, radius_sq):
 
 
 class Arena:
-    """Spatial index for steering, short ground routes, and shot checks."""
+    """Small spatial index used for local steering, not global pathfinding."""
 
     CELL = 30.0
-    ROUTE_STEP = 4.0
 
     def __init__(self, hello):
         self.ok = False
@@ -101,7 +99,6 @@ class Arena:
         self.cells = defaultdict(list)
         self.heights = None
         self.terrain = None
-        self.bounds = None
         self.max_step = float(hello["config"]["mech"]["step_up"])
         self.max_slope = math.tan(math.radians(float(hello["config"]["mech"]["max_slope_deg"])))
         try:
@@ -109,7 +106,6 @@ class Arena:
             with open(os.path.join(map_dir, "v2", "world.json"), "r", encoding="utf-8") as handle:
                 world = json.load(handle)
             self.terrain = world["terrain"]
-            self.bounds = world.get("bounds")
             raw = array("h")
             with open(os.path.join(map_dir, "v2", self.terrain["file"]), "rb") as handle:
                 raw.fromfile(handle, int(self.terrain["nx"]) * int(self.terrain["ny"]))
@@ -221,85 +217,6 @@ class Arena:
                 return False
         return True
 
-    def walkable_leg(self, start, end, radius, height):
-        """Check clearance and walkable grade along a short ground segment."""
-        if not self.ok:
-            return True
-        bounds = self.bounds
-        if bounds and not (
-            bounds["minX"] + radius <= end[0] <= bounds["maxX"] - radius
-            and bounds["minY"] + radius <= end[1] <= bounds["maxY"] - radius
-        ):
-            return False
-        distance = distance2(start, end)
-        steps = max(1, math.ceil(distance / 2.0))
-        prev_z = self.ground(start[0], start[1])
-        step_rise = max(self.max_step, self.max_slope * distance / steps)
-        for index in range(1, steps + 1):
-            fraction = index / steps
-            x = start[0] + (end[0] - start[0]) * fraction
-            y = start[1] + (end[1] - start[1]) * fraction
-            z = self.ground(x, y)
-            if abs(z - prev_z) > step_rise or self.blocked(x, y, z, radius, height):
-                return False
-            prev_z = z
-        return True
-
-    def pickup_route(self, start, goal, radius, height, search_limit=110):
-        """Find a bounded walking route, with no path search for open ground."""
-        if self.walkable_leg(start, goal, radius, height):
-            return (tuple(goal[:2]),)
-        if not self.ok or abs(goal[2] - self.ground(goal[0], goal[1])) > 4.0:
-            return None
-        step = self.ROUTE_STEP
-        sx, sy = round(start[0] / step), round(start[1] / step)
-        offsets = ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
-        queue = []
-        costs = {}
-        parent = {}
-        for dx, dy in ((0, 0), *offsets):
-            node = (sx + dx, sy + dy)
-            point = (node[0] * step, node[1] * step)
-            if self.walkable_leg(start, point, radius, height):
-                cost = distance2(start, point)
-                costs[node] = cost
-                parent[node] = None
-                heappush(queue, (cost + 1.18 * distance2(point, goal), cost, node))
-        visited = 0
-        while queue and visited < search_limit:
-            _, cost, node = heappop(queue)
-            if cost != costs[node]:
-                continue
-            visited += 1
-            point = (node[0] * step, node[1] * step)
-            distance = distance2(point, goal)
-            if distance <= step * 1.7 and self.walkable_leg(point, goal, radius, height):
-                route = [tuple(goal[:2])]
-                while node is not None:
-                    route.append((node[0] * step, node[1] * step))
-                    node = parent[node]
-                route.reverse()
-                # Keep grid corners but drop redundant steps on straight legs.
-                compact = []
-                anchor = start
-                for index, waypoint in enumerate(route):
-                    if index + 1 == len(route) or not self.walkable_leg(anchor, route[index + 1], radius, height):
-                        compact.append(waypoint)
-                        anchor = waypoint
-                return tuple(compact)
-            for dx, dy in offsets:
-                nxt = (node[0] + dx, node[1] + dy)
-                endpoint = (nxt[0] * step, nxt[1] * step)
-                next_cost = cost + step * (math.sqrt(2.0) if dx and dy else 1.0)
-                remaining = distance2(endpoint, goal)
-                if next_cost >= costs.get(nxt, math.inf) or next_cost + remaining > 100.0:
-                    continue
-                if self.walkable_leg(point, endpoint, radius, height):
-                    costs[nxt] = next_cost
-                    parent[nxt] = node
-                    heappush(queue, (next_cost + 1.18 * remaining, next_cost, nxt))
-        return None
-
     def steer(self, pos, desired, previous, radius, height, zone):
         heading = math.atan2(desired[1], desired[0])
         previous_heading = math.atan2(previous[1], previous[0]) if length2(previous) > 0.05 else heading
@@ -346,7 +263,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v7"
+    name = "edgewise-v8"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -363,9 +280,6 @@ class RoyaleBot:
         self.attacker = None
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
         self.pickup_radius = float(self.cfg["loot"]["pickup_radius"])
-        self.opening_pickups = {}
-        self.opening_plan = None
-        self.opening_retry_at = 0.0
 
     def _inside_margin(self, point, center, radius):
         return radius - distance2(point, center)
@@ -394,126 +308,6 @@ class RoyaleBot:
             return None
         preference = {"laser": 8.0, "mortar": 5.0, "lightning": 0.0}
         return min(choices, key=lambda p: distance2(pos, p["pos"]) - preference.get(p["kind"], 0.0))
-
-    def _opening_move(self, obs, enemies, projectile_danger, urgent):
-        """Arm early on a checked route and let immediate danger interrupt it."""
-        me = obs["self"]
-        now = float(obs["t"])
-        pos = me["pos"]
-        if urgent or all(me["weapons"]) or now >= 55.0 or me["hp"] < me["max_hp"] * 0.62:
-            self.opening_plan = None
-            self.opening_pickups.clear()
-            return None
-        for pickup in obs.get("pickups", []):
-            if pickup["kind"] != "gun":
-                self.opening_pickups[pickup["id"]] = (now, pickup)
-        for event in obs.get("events", []):
-            if event.get("type") == "take_failed" and event.get("reason") in {"gone", "have"}:
-                self.opening_pickups.pop(event.get("id"), None)
-        self.opening_pickups = {
-            identifier: (seen, pickup)
-            for identifier, (seen, pickup) in self.opening_pickups.items()
-            if now - seen < 8.0
-        }
-        if projectile_danger or not me["grounded"]:
-            return None
-
-        radius = float(me["stats"].get("radius", 2.5)) + 0.40
-        height = float(me["stats"].get("height", 9.0))
-        nearby = sorted(enemies, key=lambda enemy: distance2(pos, enemy["pos"]))[:2]
-        nearest = distance2(pos, nearby[0]["pos"]) if nearby else math.inf
-        zone = obs["zone"]
-        hit_recently = now < self.damage_until
-        held = {item["kind"] for item in me["weapons"] if item}
-        route_limit = 82.0 if nearest > 105.0 and not hit_recently else clamp(nearest * 0.6, 18.0, 48.0)
-        if hit_recently:
-            route_limit = min(27.0, route_limit)
-
-        def safe_to_approach(pickup):
-            goal = pickup["pos"]
-            if (
-                pickup["kind"] in held or abs(goal[2] - pos[2]) > 4.0
-                or self._inside_margin(goal, zone["center"], zone["radius"]) < 16.0
-            ):
-                return False
-            if hit_recently and self.damage_bearing is not None:
-                toward_hit = (math.cos(self.damage_bearing), math.sin(self.damage_bearing))
-                if dot2((goal[0] - pos[0], goal[1] - pos[1]), toward_hit) > 4.0:
-                    return False
-            return all(
-                distance2(goal, enemy["pos"]) >= min(34.0, distance2(pos, enemy["pos"]) + 4.0)
-                for enemy in nearby
-            )
-
-        plan = self.opening_plan
-        if plan is not None:
-            pickup = plan["pickup"]
-            if (
-                pickup["id"] not in self.opening_pickups or not safe_to_approach(pickup)
-                or now - plan["started"] >= 9.0 or now - plan["progress_at"] > 1.2
-            ):
-                self.opening_plan = plan = None
-        if plan is None and now >= self.opening_retry_at:
-            preference = {"laser": 7.0, "mortar": 4.0, "lightning": 0.0}
-            candidates = []
-            for seen, pickup in self.opening_pickups.values():
-                distance = distance2(pos, pickup["pos"])
-                if distance <= route_limit and safe_to_approach(pickup):
-                    age_penalty = 2.0 * (now - seen)
-                    candidates.append((distance + age_penalty - preference.get(pickup["kind"], 0.0), pickup["id"], distance, pickup))
-            self.opening_retry_at = now + 0.8
-            best_cost = math.inf
-            for priority, _, distance, pickup in sorted(candidates)[:2]:
-                if priority >= best_cost:
-                    break
-                route = self.arena.pickup_route(pos, pickup["pos"], radius, height, search_limit=75)
-                if route is None:
-                    continue
-                legs = tuple(zip((pos, *route[:-1]), route))
-                length = sum(distance2(start, end) for start, end in legs)
-                if length > route_limit * 1.20:
-                    continue
-                if any(
-                    segment_distance_sq(*enemy["pos"][:2], *start[:2], *end)
-                    < min(24.0, max(0.0, distance2(pos, enemy["pos"]) - 1.0)) ** 2
-                    for start, end in legs for enemy in nearby
-                ):
-                    continue
-                cost = priority + (length - distance)
-                if cost < best_cost:
-                    best_cost = cost
-                    plan = {
-                        "pickup": pickup, "route": route, "waypoint": 0, "started": now,
-                        "remaining": math.inf, "progress_at": now,
-                    }
-            self.opening_plan = plan
-        if plan is None:
-            return None
-
-        pickup = plan["pickup"]
-        route = plan["route"]
-        index = plan["waypoint"]
-        remaining = distance2(pos, route[index])
-        if remaining < 1.25 and index + 1 < len(route):
-            index += 1
-            plan.update(waypoint=index, remaining=math.inf)
-            remaining = distance2(pos, route[index])
-        if remaining < plan["remaining"] - 0.45:
-            plan.update(remaining=remaining, progress_at=now)
-        taking = distance2(pos, pickup["pos"]) <= self.pickup_radius
-        waypoint = route[index]
-        direction = unit((waypoint[0] - pos[0], waypoint[1] - pos[1]))
-        lookahead = min(remaining, 3.5)
-        probe = (pos[0] + lookahead * direction[0], pos[1] + lookahead * direction[1])
-        if not taking and not self.arena.walkable_leg(pos, probe, radius, height):
-            self.opening_plan = None
-            self.opening_retry_at = min(self.opening_retry_at, now + 0.4)
-            return None
-        scale = 0.0 if taking else min(1.0, remaining / 4.0)
-        boost = (
-            remaining > 10.0 and not taking and me["energy"] >= (52.0 if nearest < 105.0 else 64.0)
-        )
-        return [direction[0] * scale, direction[1] * scale], boost, pickup if taking else None
 
     def _zone_plan(self, obs):
         me = obs["self"]
@@ -545,31 +339,75 @@ class RoyaleBot:
         return vector, urgent, current_margin, next_margin
 
     def _projectile_dodge(self, obs):
-        pos = obs["self"]["pos"]
+        me = obs["self"]
+        pos = me["pos"]
+        velocity = me["vel"]
+        radius = float(me["stats"].get("radius", 2.5))
+        height = float(me["stats"].get("height", 9.0))
+        mortar = self.cfg["weapons"]["mortar"]
+        gravity = float(mortar["gravity"])
+        splash = float(mortar["splash_radius"])
         dodge = [0.0, 0.0]
-        danger = False
+        nearest_hazard = None
         for projectile in obs.get("projectiles", []):
-            rel = (projectile["pos"][0] - pos[0], projectile["pos"][1] - pos[1])
-            vel = (projectile["vel"][0], projectile["vel"][1])
-            speed_sq = dot2(vel, vel)
-            if speed_sq < 4.0:
+            origin = projectile["pos"]
+            drift = projectile["vel"]
+            rel = (origin[0] - pos[0], origin[1] - pos[1])
+            relative_vel = (drift[0] - velocity[0], drift[1] - velocity[1])
+            relative_speed_sq = dot2(relative_vel, relative_vel)
+            is_mortar = projectile["kind"] == "mortar"
+            direct = None
+            if relative_speed_sq > EPS:
+                approach = -dot2(rel, relative_vel) / relative_speed_sq
+                if 0.0 <= approach <= 0.8:
+                    miss = (rel[0] + relative_vel[0] * approach, rel[1] + relative_vel[1] * approach)
+                    z = origin[2] + drift[2] * approach - (0.5 * gravity * approach ** 2 if is_mortar else 0.0)
+                    feet = pos[2] + (0.0 if me["grounded"] else velocity[2] * approach)
+                    if length2(miss) < radius + 1.0 and feet - 0.7 <= z <= feet + height + 0.7:
+                        endpoint = (origin[0] + drift[0] * approach, origin[1] + drift[1] * approach, z)
+                        if is_mortar or self.arena.shot_clear(origin, endpoint):
+                            direct = (approach, miss, 1.0)
+            impact = self._mortar_impact(me, origin, drift, gravity, splash + radius + 0.9) if is_mortar else None
+            hazard = min((risk for risk in (direct, impact) if risk is not None), default=None)
+            if hazard is None:
                 continue
-            approach = -dot2(rel, vel) / speed_sq
-            if 0.0 <= approach <= 0.9:
-                miss = (rel[0] + vel[0] * approach, rel[1] + vel[1] * approach)
-                danger_radius = 11.0 if projectile["kind"] == "mortar" else 4.5
-                if length2(miss) < danger_radius:
-                    side = self.turn_sign if rel[0] * vel[1] - rel[1] * vel[0] >= 0 else -self.turn_sign
-                    perpendicular = unit((-vel[1] * side, vel[0] * side))
-                    dodge[0] += perpendicular[0]
-                    dodge[1] += perpendicular[1]
-                    danger = True
-            if projectile["kind"] == "mortar" and distance2(projectile["pos"], pos) < 18.0:
-                away = unit((pos[0] - projectile["pos"][0], pos[1] - projectile["pos"][1]))
-                dodge[0] += 1.5 * away[0]
-                dodge[1] += 1.5 * away[1]
-                danger = True
-        return dodge, danger
+            approach, miss, severity = hazard
+            perpendicular = unit((-relative_vel[1] * self.turn_sign, relative_vel[0] * self.turn_sign))
+            if dot2(perpendicular, self.last_move) < -0.1:
+                perpendicular = (-perpendicular[0], -perpendicular[1])
+            # The signed miss vector defines the safe side. The fallback only
+            # breaks a tie when the predicted path goes through our center.
+            away = unit((-miss[0], -miss[1]), fallback=perpendicular)
+            weight = severity * (1.2 - approach * 0.5)
+            dodge[0] += away[0] * weight
+            dodge[1] += away[1] * weight
+            if nearest_hazard is None or approach < nearest_hazard[0]:
+                nearest_hazard = (approach, away)
+        if nearest_hazard is not None and length2(dodge) < 0.2:
+            return list(nearest_hazard[1]), True
+        return dodge, nearest_hazard is not None
+
+    def _mortar_impact(self, me, origin, drift, gravity, radius):
+        """Estimate the near-term ground impact in the game simulation."""
+        pos = me["pos"]
+        if distance2(pos, origin) > (length2(drift) + length2(me["vel"])) * 0.9 + radius:
+            return None
+        previous_t = 0.0
+        previous_height = origin[2] - self.arena.ground(origin[0], origin[1])
+        for tick in range(1, 10):
+            elapsed = tick * 0.1
+            x = origin[0] + drift[0] * elapsed
+            y = origin[1] + drift[1] * elapsed
+            z = origin[2] + drift[2] * elapsed - 0.5 * gravity * elapsed ** 2
+            height = z - self.arena.ground(x, y)
+            if height <= 0.0:
+                elapsed = previous_t + 0.1 * clamp(previous_height / max(EPS, previous_height - height), 0.0, 1.0)
+                offset = tuple(origin[i] - pos[i] + (drift[i] - me["vel"][i]) * elapsed for i in range(2))
+                if length2(offset) < radius:
+                    return elapsed, offset, 1.6
+                return None
+            previous_t, previous_height = elapsed, height
+        return None
 
     def _threat_vector(self, obs, enemies):
         pos = obs["self"]["pos"]
@@ -774,7 +612,6 @@ class RoyaleBot:
         threat, closest = self._threat_vector(obs, enemies)
         dodge, projectile_danger = self._projectile_dodge(obs)
         threatened = closest < 105.0 or now < self.damage_until or projectile_danger
-        opening = self._opening_move(obs, enemies, projectile_danger, urgent)
 
         objective = zone_vector
         objective_speed = 0.40  # below the default footstep threshold when walking
@@ -787,7 +624,7 @@ class RoyaleBot:
             objective = unit((pickup["pos"][0] - pos[0], pickup["pos"][1] - pos[1]))
             objective_speed = 0.86
         crate = None
-        if opening is None and not threatened and not urgent and pickup_distance >= 70.0:
+        if not threatened and not urgent and pickup_distance >= 70.0:
             cubes = [cube for cube in obs.get("cubes", []) if distance2(pos, cube["pos"]) < 32.0]
             if cubes:
                 cube = min(cubes, key=lambda item: distance2(pos, item["pos"]))
@@ -842,12 +679,6 @@ class RoyaleBot:
         energy = float(me["energy"])
         boost = bool((urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0))
         jump = bool(me["grounded"] and (projectile_danger or stuck or (closest < 32.0 and now < self.damage_until)) and now - self.last_jump > 1.15)
-        if opening is not None:
-            move, boost, opening_pickup = opening
-            jump = False
-            if opening_pickup is not None:
-                pickup = opening_pickup
-                pickup_distance = distance2(pos, pickup["pos"])
         if jump:
             self.last_jump = now
 

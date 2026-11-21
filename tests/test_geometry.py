@@ -27,62 +27,43 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(y, 0.8)
 
 
-class OpeningTests(unittest.TestCase):
+class EvasionTests(unittest.TestCase):
     def setUp(self):
-        self.arena = BOT.Arena.__new__(BOT.Arena)
-        self.arena.ok = True
-        self.arena.bounds = None
-        self.arena.max_step = 1.2
-        self.arena.max_slope = math.tan(math.radians(50))
-        self.arena.ground = lambda x, y: 0.0
-        self.arena.prisms = []
-        self.arena.cells = {}
         self.bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
-        self.bot.arena = self.arena
-        self.bot.pickup_radius = 4.0
-        self.bot.opening_pickups = {}
-        self.bot.opening_plan = None
-        self.bot.opening_retry_at = 0.0
-        self.bot.damage_until = -1.0
-        self.bot.damage_bearing = None
-        self.me = {
-            "pos": [0, 0, 0], "hp": 1400, "max_hp": 1400, "grounded": True, "stats": {},
-            "energy": 100, "weapons": [{"kind": "gun"}, None],
-        }
-        self.pickup = {"id": 8001, "kind": "laser", "pos": [38.0, 0.0, 0.0]}
-        self.obs = {
-            "t": 0.0, "self": self.me, "pickups": [self.pickup], "events": [],
-            "zone": {"center": [0, 0], "radius": 300.0},
-        }
+        self.bot.cfg = {"weapons": {"mortar": {"gravity": 22.0, "splash_radius": 7.0}}}
+        self.bot.arena = BOT.Arena.__new__(BOT.Arena)
+        self.bot.arena.ok = False
+        self.bot.last_move = (0.0, 0.0)
+        self.bot.turn_sign = -1.0
+        self.me = {"pos": [0, 0, 0], "vel": [0, 0, 0], "grounded": True, "stats": {}}
 
-    def test_routes_around_a_solid_wall(self):
-        self.arena.prisms = [{
-            "ring": [12, -7, 22, -7, 22, 7, 12, 7], "holes": [],
-            "bbox": (12, -7, 22, 7), "base": 0.0, "top": 13.0,
-        }]
-        self.arena.cells = {(0, -1): [0], (0, 0): [0]}
-        route = self.arena.pickup_route(self.me["pos"], self.pickup["pos"], 2.9, 9.0)
-        self.assertIsNotNone(route)
-        self.assertGreater(len(route), 1)
-        self.assertEqual(route[-1], (38.0, 0.0))
-        for start, end in zip((self.me["pos"], *route[:-1]), route):
-            self.assertTrue(self.arena.walkable_leg(start, end, 2.9, 9.0))
+    def dodge(self, origin, velocity, kind="gun"):
+        obs = {"self": self.me, "projectiles": [{"kind": kind, "pos": origin, "vel": velocity}]}
+        return self.bot._projectile_dodge(obs)
 
-    def test_remembers_pickup_and_yields_to_projectile(self):
-        move, boost, take = self.bot._opening_move(self.obs, [], False, False)
-        self.assertEqual(move, [1.0, 0.0])
-        self.assertTrue(boost)
-        self.assertIsNone(take)
-        self.obs.update(t=0.2, pickups=[])
-        self.assertIsNone(self.bot._opening_move(self.obs, [], True, False))
-        self.me["pos"] = [35.0, 0.0, 0.0]
-        self.assertEqual(self.bot._opening_move(self.obs, [], False, False)[2], self.pickup)
-        self.obs["events"] = [{"type": "take_failed", "id": 8001, "reason": "gone"}]
-        self.assertIsNone(self.bot._opening_move(self.obs, [], False, False))
+    def test_dodges_away_from_both_sides_of_the_shot(self):
+        for side in (-1, 1):
+            with self.subTest(side=side):
+                move, danger = self.dodge([-50, side * 1.5, 5], [250, 0, 0])
+                self.assertTrue(danger)
+                self.assertLess(move[1] * side, 0)
 
-    def test_skips_weapon_beside_enemy(self):
-        enemy = {"pos": [48.0, 0.0, 0.0]}
-        self.assertIsNone(self.bot._opening_move(self.obs, [enemy], False, False))
+    def test_ignores_a_shot_well_above_body(self):
+        self.assertFalse(self.dodge([-50, 1, 21], [250, 0, 0])[1])
+
+    def test_accounts_for_moving_into_a_shot(self):
+        self.me["vel"] = [0, 18, 0]
+        move, danger = self.dodge([-100, 8, 5], [250, 0, 0])
+        self.assertTrue(danger)
+        self.assertLess(move[1], 0)
+
+    def test_dodges_predicted_mortar_landing(self):
+        move, danger = self.dodge([-24, 4, 14], [40, 0, -20], "mortar")
+        self.assertTrue(danger)
+        self.assertLess(move[1], 0)
+
+    def test_ignores_nearby_mortar_moving_toward_distant_impact(self):
+        self.assertFalse(self.dodge([5, 0, 22], [50, 0, -4], "mortar")[1])
 
 
 class CombatTests(unittest.TestCase):

@@ -2,6 +2,12 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.8.0 - 2026-11-21
+
+- Restore the 0.6 opening after the early pickup experiment reduced practice placement.
+- Dodge on the side opposite the predicted shot, including when already moving.
+- Ignore overhead bullets and evaluate nearby mortar blasts at their projected ground impact.
+
 ## 0.7.0 - 2026-11-21
 
 - Plan bounded ground routes to early weapon pickups, including detours around arena obstacles.
