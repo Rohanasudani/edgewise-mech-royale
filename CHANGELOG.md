@@ -2,6 +2,12 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.10.0 - 2026-11-21
+
+- Prioritize inward movement when the closing zone becomes urgent under fire.
+- Keep ground acceleration for projectile dodges and reserve jumps for getting unstuck.
+- Use sustained boost bursts under pressure and preserve energy between fights.
+
 ## 0.9.0 - 2026-11-21
 
 - Use recent damage and weapon availability to identify favorable isolated fights and stay within effective range.

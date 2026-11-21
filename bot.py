@@ -285,7 +285,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v9"
+    name = "edgewise-v10"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -302,6 +302,7 @@ class RoyaleBot:
         self.attacker = None
         self.damage_window = deque()
         self.last_kill = -math.inf
+        self.escape_boost = False
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
         self.pickup_radius = float(self.cfg["loot"]["pickup_radius"])
 
@@ -405,7 +406,7 @@ class RoyaleBot:
         tangent = (-away[1] * self.turn_sign, away[0] * self.turn_sign)
         direction = unit((tangent[0] * 0.80 + away[0] * radial * 1.40,
                           tangent[1] * 0.80 + away[1] * radial * 1.40))
-        return direction, distance > preferred + 18.0
+        return direction
 
     def _safe_cube(self, obs, enemies, urgent, danger):
         """Collect nearby rewards only when our arrival beats nearby opponents."""
@@ -851,14 +852,13 @@ class RoyaleBot:
                 objective = unit((goal[0] - pos[0], goal[1] - pos[1]))
                 objective_speed = 0.75 if distance2(pos, goal) > 11.0 else 0.0
 
-        desired = [objective[0] * (1.6 if urgent else 0.9), objective[1] * (1.6 if urgent else 0.9)]
-        if duel is not None:
-            direction, _ = duel
-            desired = [direction[i] * 2.1 + zone_vector[i] * 0.20 + dodge[i] * 3.3 for i in range(2)]
+        if urgent:
+            desired = [zone_vector[i] * 3.6 + dodge[i] * 3.4 + threat[i] * 0.55 for i in range(2)]
+        elif duel is not None:
+            desired = [duel[i] * 2.1 + zone_vector[i] * 0.20 + dodge[i] * 3.3 for i in range(2)]
         else:
             threat_weight = 0.24 if reward is not None or farm is not None else 1.75
-            desired[0] += threat[0] * threat_weight + dodge[0] * 2.8
-            desired[1] += threat[1] * threat_weight + dodge[1] * 2.8
+            desired = [objective[i] * 0.9 + threat[i] * threat_weight + dodge[i] * 2.8 for i in range(2)]
         desired = unit(desired, fallback=objective)
 
         commanded_before = length2(self.last_move)
@@ -884,12 +884,18 @@ class RoyaleBot:
         move_scale = 1.0 if (threatened or urgent or stuck) and farm is None else objective_speed
         move = [steered[0] * move_scale, steered[1] * move_scale]
         energy = float(me["energy"])
-        boost = bool((urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0))
-        if duel is not None and not projectile_danger and not stuck:
-            boost = duel[1] and energy > 66.0
-        elif farm is not None and not stuck:
+        if urgent or stuck:
+            boost = (urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0)
+        elif projectile_danger and me["grounded"]:
+            boost = energy > 24.0
+        elif farm is not None or not me["grounded"]:
             boost = False
-        jump = bool(me["grounded"] and (projectile_danger or stuck or (closest < 32.0 and now < self.damage_until)) and now - self.last_jump > 1.15)
+        else:
+            close_enemies = sum(distance2(pos, enemy["pos"]) < 110.0 for enemy in enemies)
+            needs_escape = close_enemies > 1 or now < self.damage_until
+            boost = needs_escape and energy > (36.0 if self.escape_boost else 65.0)
+        self.escape_boost = boost
+        jump = bool(me["grounded"] and stuck and now - self.last_jump > 1.15)
         if jump:
             self.last_jump = now
 

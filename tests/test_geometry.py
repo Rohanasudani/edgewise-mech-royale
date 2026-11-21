@@ -166,6 +166,7 @@ class ProgressionTests(unittest.TestCase):
         self.bot.damage_until = -1.0
         self.bot.attacker = None
         self.bot.last_kill = -math.inf
+        self.bot.escape_boost = False
         self.bot.turn_sign = 1.0
         self.obs = {
             "t": 5.0, "self": {
@@ -181,7 +182,7 @@ class ProgressionTests(unittest.TestCase):
         self.obs["events"] = [{"type": "hit", "target": 2, "amount": 90}]
         self.bot._record_combat(self.obs, 5.0)
         duel = self.bot._duel_vector(self.obs, self.foe, [self.foe], False, 300.0)
-        self.assertGreater(duel[0][0], 0.5)
+        self.assertGreater(duel[0], 0.5)
         second = dict(self.foe, id=3, pos=[51, 20, 0])
         self.assertIsNone(self.bot._duel_vector(self.obs, self.foe, [self.foe, second], False, 300.0))
         self.assertIsNone(self.bot._duel_vector(self.obs, self.foe, [self.foe], True, 300.0))
@@ -216,6 +217,32 @@ class ProgressionTests(unittest.TestCase):
         self.assertEqual(self.bot._farm_target(self.obs, [], False, False), drone)
         self.bot.attacker = 2
         self.assertIsNone(self.bot._farm_target(self.obs, [], False, False))
+
+    def test_retreat_does_not_drive_outward_when_zone_is_urgent(self):
+        self.bot.cfg = {"weapons": {"mortar": {"gravity": 22, "splash_radius": 7}}}
+        self.bot.last_move = (0.0, 0.0)
+        self.bot.stuck_ticks = 0
+        self.bot.last_jump = -10.0
+        self.bot.pickup_radius = 4.0
+        self.obs["self"].update(pos=[108, 0, 0], vel=[0, 0, 0], grounded=True, aim=[math.pi, 0.0])
+        self.obs["self"]["weapons"][0]["stats"] = {"speed": 252, "range": 230}
+        attacker = dict(self.foe, pos=[42, 0, 0], vel=[0, 0, 0], hp=1200)
+        self.obs.update(
+            t=52.0,
+            zone={"center": [0, 0], "radius": 100, "next_center": [-15, 0],
+                  "next_radius": 70, "shrink_end": 56.0},
+            events=[{"type": "damaged", "by": 2, "amount": 42.0, "bearing": math.pi}],
+            mechs=[attacker],
+        )
+        action = self.bot.act(self.obs)
+        self.assertLess(action["move"][0], -0.9)
+        self.assertTrue(action["boost"])
+        self.obs["zone"].update(radius=250, next_radius=240)
+        self.obs["projectiles"] = [{
+            "kind": "gun", "pos": [58, 1.5, 5], "vel": [250, 0, 0],
+        }]
+        self.assertTrue(self.bot._projectile_dodge(self.obs)[1])
+        self.assertFalse(self.bot.act(self.obs)["jump"])
 
 
 if __name__ == "__main__":

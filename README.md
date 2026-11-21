@@ -7,11 +7,14 @@ Edgewise is a deterministic, survival-first bot for the `mechfight/1` protocol. 
 - Stay near the useful edge of the next safe circle instead of joining fights in the center.
 - Walk silently while unthreatened; boost, jump, and strafe only when pressure or the zone justifies the energy and noise.
 - Use the arena geometry and terrain for local collision avoidance.
+- Prioritize reaching the safe circle when it becomes urgent.
 - Acquire one non-gun weapon and break nearby crates early when a weapon pickup is unavailable.
 - Keep using the arm gun while the mortar cools, and fire both slots when their aim permits.
 - Check the arena geometry before firing at opponents still tracked behind cover.
 - Face recent attackers to protect rear armor, dodge incoming projectiles, and retreat while returning accurate fire.
 - Check projectile elevation and relative velocity, and dodge away from the predicted impact.
+- Keep ground acceleration available during combat and jump to recover from blocked movement.
+- Preserve boost energy between fights for urgent movement and evasive bursts.
 - Prefer armor, health, mobility, and recovery upgrades over damage.
 - Convert favorable fights into upgrades by collecting nearby, uncontested cubes.
 - Use brief safe windows to shoot nearby crates or drones and build early upgrades.
