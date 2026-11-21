@@ -12,6 +12,7 @@ Keep every submitted commit public until the event results are published. The Bu
 | `submission-06` | `aa98b03` | 2026-11-21 11:58 AM ET | Preserve ammunition and firing opportunities by checking shots against arena geometry. | 2.33 | Passed and scored | Receipt `BB-761B95FD`; selected as best entry |
 | `submission-07` | `353ee35` | 2026-11-21 12:07 PM ET | Acquire the second weapon earlier with safe opening routes. | 2.10 | Passed and scored | Receipt `BB-D931975C`; `submission-06` remains selected |
 | `submission-08` | `b921074` | 2026-11-21 12:17 PM ET | Avoid incoming fire by predicting the shot path and ground impact. | 2.56 | Passed and scored | Receipt `BB-539F0286`; selected as best entry |
+| `submission-09` | `6ab78fc` | 2026-11-21 12:47 PM ET | Finish favorable fights and turn safe cube pickups into upgrades. | 2.60 | Passed and scored | Receipt `BB-1A3D6C8E`; selected as best entry |
 
 ## Candidate checklist
 
