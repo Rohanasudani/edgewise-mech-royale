@@ -2,6 +2,11 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.13.0 - 2026-11-21
+
+- Plan jet crossings between disconnected walking regions when the zone is closing.
+- Rank exposed opponents by estimated time to finish, current weapon effectiveness, and recent damage received.
+
 ## 0.12.0 - 2026-11-21
 
 - Route around arena obstacles before the zone closes and use the same ground graph for contested loot approaches.

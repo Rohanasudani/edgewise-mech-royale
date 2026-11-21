@@ -272,6 +272,8 @@ class GroundRoutes:
         self.arena = arena
         self.points = {}
         self.links = {}
+        self.regions = {}
+        self.gates = {}
         if not arena.ok:
             return
         spacing = self.SPACING
@@ -295,18 +297,91 @@ class GroundRoutes:
                 cost = distance2(start, end) + 0.23 * abs(end[2] - start[2])
                 self.links[ix, iy].append((neighbor, cost))
                 self.links[neighbor].append(((ix, iy), cost))
+        self._build_jet_gates()
+
+    def _build_jet_gates(self):
+        unseen = set(self.links)
+        parts = []
+        while unseen:
+            members = [unseen.pop()]
+            for node in members:
+                self.regions[node] = len(parts)
+                for neighbor, _ in self.links[node]:
+                    if neighbor in unseen:
+                        unseen.remove(neighbor)
+                        members.append(neighbor)
+            parts.append(members)
+        if len(parts) < 2:
+            return
+        largest = max(range(len(parts)), key=lambda i: len(parts[i]))
+        offsets = [(x, y) for x in range(-3, 4) for y in range(-3, 4) if 2 <= x * x + y * y <= 13]
+        for region, members in enumerate(parts):
+            if region == largest or len(members) < 15:
+                continue
+            options = []
+            for x, y in members:
+                start = self.points[x, y]
+                for dx, dy in offsets:
+                    neighbor = x + dx, y + dy
+                    destination = self.regions.get(neighbor)
+                    if destination is None or destination == region or len(parts[destination]) < 15:
+                        continue
+                    end = self.points[neighbor]
+                    climb = max(0.0, end[2] - start[2])
+                    if climb <= 27.0:
+                        cost = distance2(start, end) + 1.3 * climb + (0.0 if destination == largest else 21.0)
+                        options.append((cost, start, end, destination))
+            gates = []
+            for _, start, end, destination in sorted(options)[:300]:
+                if any(distance2(gate[0], start) < 16.0 for gate in gates):
+                    continue
+                altitude = self._flight_height(start, end)
+                if altitude is None:
+                    continue
+                energy = 16.0 + 15.0 * ((altitude - start[2]) / 8.9 + distance2(start, end) / 12.0 + 0.5)
+                if energy <= 98.0:
+                    gates.append((start, end, altitude, energy, destination == largest))
+                if len(gates) >= 10:
+                    break
+            if gates:
+                self.gates[region] = gates
+
+    def _flight_height(self, start, end):
+        steps = math.ceil(distance2(start, end) / 2.4)
+        samples = [(start[0] + (end[0] - start[0]) * step / steps,
+                    start[1] + (end[1] - start[1]) * step / steps) for step in range(steps + 1)]
+        terrain_top = max(self.arena.ground(x, y) for x, y in samples)
+        for altitude in range(math.ceil(terrain_top + 2.1), math.floor(start[2] + 30.0), 2):
+            if any(self.arena.blocked(x, y, altitude, self.RADIUS, self.HEIGHT) for x, y in samples):
+                continue
+            if any(self.arena.blocked(point[0], point[1], z, self.RADIUS, self.HEIGHT)
+                   for point in (start, end) for z in range(math.ceil(point[2] + 1.0), altitude, 2)):
+                continue
+            return altitude
+        return None
+
+    def _entry(self, origin):
+        spacing = self.SPACING
+        ix, iy = (round(value / spacing) for value in origin[:2])
+        nodes = [(ix + dx, iy + dy) for dx in range(-2, 3) for dy in range(-2, 3)]
+        nodes = sorted((node for node in nodes if self.links.get(node)),
+                       key=lambda node: distance2(origin, self.points[node]))
+        return next((node for node in nodes if self.arena.ground_leg_clear(
+            origin, self.points[node], self.RADIUS, self.HEIGHT)), None)
+
+    def jet_gate(self, origin, center, radius):
+        if not self.gates or distance2(origin, center) < radius or abs(origin[2] - self.arena.ground(*origin[:2])) > 3.2:
+            return None
+        node = self._entry(origin)
+        options = self.gates.get(self.regions.get(node), ())
+        return min(options, key=lambda gate: distance2(origin, gate[0]) + 0.35 * distance2(center, gate[1])
+                   + gate[3] * 0.25 + (0.0 if gate[4] else 45.0), default=None)
 
     def route(self, origin, center, radius):
         if not self.points or abs(origin[2] - self.arena.ground(*origin[:2])) > 2.2:
             return []
         deadline = time.perf_counter() + 0.014
-        spacing = self.SPACING
-        ix, iy = (round(value / spacing) for value in origin[:2])
-        starts = [(ix + dx, iy + dy) for dx in range(-2, 3) for dy in range(-2, 3)]
-        starts = sorted((node for node in starts if self.links.get(node)),
-                        key=lambda node: distance2(origin, self.points[node]))
-        start = next((node for node in starts if self.arena.ground_leg_clear(
-            origin, self.points[node], self.RADIUS, self.HEIGHT)), None)
+        start = self._entry(origin)
         if start is None:
             return []
 
@@ -334,7 +409,7 @@ class GroundRoutes:
                     costs[neighbor] = travel
                     parents[neighbor] = node
                     heapq.heappush(queue, (travel + 1.12 * remaining(neighbor), travel, neighbor))
-        if best_gap > 0.0 and initial_gap - best_gap < spacing:
+        if best_gap > 0.0 and initial_gap - best_gap < self.SPACING:
             return []
         route = []
         while best is not None:
@@ -370,7 +445,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v12"
+    name = "edgewise-v13"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -384,6 +459,14 @@ class RoyaleBot:
         self.weapon_goal = None
         self.weapon_route = deque()
         self.weapon_route_retry = -1.0
+        self.jet_route = deque()
+        self.jet_gate = None
+        self.jet_retry = -1.0
+        self.jet_phase = None
+        self.jet_started = -1.0
+        self.focus = None
+        self.focus_until = -1.0
+        self.damage_sources = {}
         self.last_move = (0.0, 0.0)
         self.last_pos = None
         self.last_t = 0.0
@@ -413,6 +496,8 @@ class RoyaleBot:
         defeated = {event.get("target") for event in events if event.get("type") == "kill"}
         if defeated:
             self.last_kill = now
+            if self.focus in defeated:
+                self.focus = None
             if self.attacker in defeated:
                 self.attacker = self.damage_bearing = None
                 self.damage_until = -1.0
@@ -423,6 +508,10 @@ class RoyaleBot:
                     self.damage_bearing = float(event["bearing"])
                     self.damage_until = now + 3.2
                     self.attacker = event.get("by")
+                if event.get("by") is not None:
+                    source = event["by"]
+                    when, amount = self.damage_sources.get(source, (now, 0.0))
+                    self.damage_sources[source] = (now, event["amount"] + amount * math.exp(-(now - when) / 1.9))
 
     def _safe_ground_goal(self, obs, goal, urgent=False):
         me = obs["self"]
@@ -711,6 +800,62 @@ class RoyaleBot:
             self.zone_route.clear()
         return heading, urgent
 
+    def _exit_terrain(self, obs, next_margin, action):
+        """Cross a mapped jet route when the closing circle lies beyond the walking region."""
+        me, zone, now = obs["self"], obs["zone"], obs["t"]
+        pos = me["pos"]
+        if self.jet_phase is not None:
+            if now - self.jet_started > 8.0 or (me["grounded"] and now > self.jet_started + 0.25):
+                self.jet_phase = self.jet_gate = None
+                self.zone_route.clear()
+                return
+            _, landing, altitude, _, _ = self.jet_gate
+            if self.jet_phase == "climb" and pos[2] >= altitude:
+                self.jet_phase = "cross"
+            if self.jet_phase == "cross" and distance2(pos, landing) <= 3.6:
+                self.jet_phase = "land"
+            direction = unit((landing[0] - pos[0], landing[1] - pos[1])) if self.jet_phase == "cross" else (0.0, 0.0)
+            action["move"] = list(direction)
+            action["boost"] = self.jet_phase == "climb" or (
+                self.jet_phase == "cross" and pos[2] < altitude + 2.0 and me["vel"][2] < 3.0
+            )
+            action["jump"] = False
+            return
+        if not me["grounded"] or not self.arena.ok:
+            return
+
+        travel = max(0.0, 18.0 - next_margin)
+        if travel < 18.0 or zone["shrink_end"] - now > 30.0 + travel * 0.15:
+            self.jet_gate = None
+            return
+        if self.jet_gate is None and now >= self.jet_retry:
+            self.jet_retry = now + 1.5
+            gate = self.routes.jet_gate(pos, zone["next_center"], max(5.0, zone["next_radius"] - 17.0))
+            if gate is not None:
+                route = self.routes.route(pos, gate[0], 3.4)
+                if route and distance2(route[-1], gate[0]) < 4.2:
+                    self.jet_gate = gate
+                    self.jet_route = deque(route)
+        if self.jet_gate is None:
+            return
+
+        launch, _, _, energy, _ = self.jet_gate
+        if distance2(pos, launch) < 3.3:
+            action.update(move=[0.0, 0.0], boost=False, jump=False)
+            if me["energy"] >= energy and length2(me["vel"]) < 4.0:
+                self.jet_phase = "climb"
+                self.jet_started = self.last_jump = now
+                action["jump"] = True
+            return
+        while self.jet_route and distance2(pos, self.jet_route[0]) < 3.8:
+            self.jet_route.popleft()
+        waypoint = self.jet_route[0] if self.jet_route else launch
+        if distance2(pos, waypoint) > 21.0:
+            self.jet_gate = None
+            return
+        direction = unit((waypoint[0] - pos[0], waypoint[1] - pos[1]))
+        action.update(move=list(direction), boost=False, jump=False)
+
     def _projectile_dodge(self, obs):
         me = obs["self"]
         pos = me["pos"]
@@ -877,25 +1022,62 @@ class RoyaleBot:
         return result, closest
 
     def _primary_enemy(self, obs, enemies):
-        if len(enemies) < 2:
-            return enemies[0] if enemies else None
+        if not enemies:
+            return None
+        if len(enemies) == 1:
+            self.focus = enemies[0]["id"]
+            return enemies[0]
         me = obs["self"]
+        now = obs["t"]
         pos = me["pos"]
-        def score(enemy):
-            value = distance2(pos, enemy["pos"])
-            if enemy["id"] == self.attacker and obs["t"] < self.damage_until:
-                value -= 32.0
+        slots = self._weapon_slots(me)
+        ranked = sorted(enemies, key=lambda enemy: distance2(pos, enemy["pos"]))[:6]
+        scale = 1.0 + 0.04 * min(me.get("cubes", 0), 10)
+        get_gun = slots.get("gun")
+        get_laser = slots.get("laser")
+        get_lightning = slots.get("lightning")
+        gun_rate = 0.0 if get_gun is None else 90.0 * max(0.45, 1.0 - get_gun[1].get("reload", 0.0) * 0.19)
+        laser_rate = 0.0 if get_laser is None else 127.0
+        lightning_range = 0.0 if get_lightning is None or me["energy"] <= 13.0 else get_lightning[1]["stats"]["range"]
+        best = None
+        best_value = -math.inf
+        for enemy in ranked:
+            identifier = enemy["id"]
+            dx, dy = enemy["pos"][0] - pos[0], enemy["pos"][1] - pos[1]
+            distance = math.hypot(dx, dy)
+            if distance > 242.0:
+                continue
+            yaw = math.atan2(dy, dx)
+            angle = abs(angle_diff(yaw, me["aim"][0]))
+            turn_time = angle / me["stats"].get("turn_rate", 4.0)
+            damage_rate = 22.0 + gun_rate * clamp(1.13 - distance / 478.0, 0.35, 1.0)
+            damage_rate += laser_rate * (1.6 if "mortar" in (enemy.get("weapons") or ()) else 1.0)
+            if distance < lightning_range:
+                damage_rate += 163.0
+            enemy_aim = enemy.get("aim")
+            if enemy_aim is not None and abs(angle_diff(yaw + math.pi, enemy_aim[0])) > 1.75:
+                damage_rate *= 1.36
             hp = enemy.get("hp")
-            if hp is not None:
-                value += 49.0 * hp / max(1.0, enemy.get("max_hp", hp))
-            if enemy.get("charging"):
-                value -= 18.0
-            return value
-        ranked = sorted(enemies, key=score)
-        for enemy in ranked[:3]:
-            if self.arena.shot_clear(*self._direct_line(me, enemy)):
-                return enemy
-        return ranked[0]
+            hp = 1100.0 if hp is None else hp
+            finish_time = hp / (damage_rate * scale)
+            value = -0.21 * finish_time - 0.015 * distance - 0.68 * turn_time
+            value += 0.9 if hp < 200.0 else 0.0
+            value += 0.60 if enemy.get("charging") else 0.0
+            timestamp, incoming = self.damage_sources.get(identifier, (now, 0.0))
+            recent = incoming * math.exp(-(now - timestamp) / 2.1)
+            value += min(1.8, recent / 120.0)
+            if recent > 80.0 and angle > 1.6:
+                value += min(1.2, (angle - 1.6) * 1.2)
+            if identifier == self.focus and now < self.focus_until:
+                value += 0.48
+            if value > best_value and self.arena.shot_clear(*self._direct_line(me, enemy)):
+                best, best_value = enemy, value
+        if best is None:
+            return next((enemy for enemy in ranked if enemy["id"] == self.attacker and now < self.damage_until), ranked[0])
+        if best["id"] != self.focus:
+            self.focus = best["id"]
+            self.focus_until = now + 1.35
+        return best
 
     def _direct_line(self, me, target, speed=None):
         muzzle = (me["pos"][0], me["pos"][1], me["pos"][2] + float(me["stats"].get("muzzle_height", 7.0)))
@@ -1174,6 +1356,7 @@ class RoyaleBot:
                 action["take"] = pickup["id"]
 
         self._arm_action(obs, enemies, urgent, current_margin, next_margin, projectile_danger, action)
+        self._exit_terrain(obs, next_margin, action)
 
         self.last_move = tuple(action["move"])
         self.last_pos = tuple(pos)

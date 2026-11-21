@@ -123,11 +123,14 @@ class CombatTests(unittest.TestCase):
         self.bot.damage_bearing = None
         self.bot.scan_yaw = 0.0
         self.bot.attacker = None
+        self.bot.focus = None
+        self.bot.focus_until = -1.0
+        self.bot.damage_sources = {}
         self.gun = {"kind": "gun", "ammo": 12, "stats": {"speed": 252.0, "range": 230.0}}
         self.mortar = {"kind": "mortar", "cooldown": 2.0, "stats": {
             "speed": 72.0, "gravity": 22.0, "splash_radius": 7.0,
         }}
-        self.me = {"pos": [0, 0, 0], "stats": {}, "weapons": [self.gun, self.mortar]}
+        self.me = {"pos": [0, 0, 0], "aim": [0.0, 0.0], "stats": {}, "weapons": [self.gun, self.mortar]}
         self.target = {"id": 7, "kind": "mech", "pos": [75, 0, 0], "vel": [0, 0, 0]}
         self.obs = {"self": self.me, "t": 1.0}
 
@@ -213,6 +216,11 @@ class CombatTests(unittest.TestCase):
         exposed = dict(self.target, id=8, pos=[75, 30, 0])
         self.assertEqual(self.bot._primary_enemy(self.obs, [self.target, exposed]), exposed)
 
+    def test_focus_finishes_a_wounded_opponent_in_clear_sight(self):
+        healthy = dict(self.target, pos=[38, 0, 0], hp=1200)
+        wounded = dict(self.target, id=9, pos=[77, 25, 0], hp=130)
+        self.assertEqual(self.bot._primary_enemy(self.obs, [healthy, wounded]), wounded)
+
 
 class ProgressionTests(unittest.TestCase):
     def setUp(self):
@@ -228,6 +236,10 @@ class ProgressionTests(unittest.TestCase):
         self.bot.weapon_goal = None
         self.bot.weapon_route = deque()
         self.bot.weapon_route_retry = -1.0
+        self.bot.jet_phase = None
+        self.bot.focus = None
+        self.bot.focus_until = -1.0
+        self.bot.damage_sources = {}
         self.bot.turn_sign = 1.0
         self.obs = {
             "t": 5.0, "self": {
@@ -304,6 +316,19 @@ class ProgressionTests(unittest.TestCase):
         }]
         self.assertTrue(self.bot._projectile_dodge(self.obs)[1])
         self.assertFalse(self.bot.act(self.obs)["jump"])
+
+    def test_jet_crossing_waits_for_altitude_before_moving_horizontally(self):
+        self.bot.jet_gate = ((0, 0, 0), (14, 0, 0), 8, 60, True)
+        self.bot.jet_phase = "climb"
+        self.bot.jet_started = 5.0
+        self.obs["self"].update(pos=[0, 0, 4], vel=[0, 0, 4], grounded=False)
+        action = {}
+        self.bot._exit_terrain(self.obs, -30, action)
+        self.assertEqual(action["move"], [0.0, 0.0])
+        self.assertTrue(action["boost"])
+        self.obs["self"]["pos"][2] = 9
+        self.bot._exit_terrain(self.obs, -30, action)
+        self.assertEqual(action["move"], [1.0, 0.0])
 
 
 if __name__ == "__main__":
