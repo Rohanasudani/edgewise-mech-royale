@@ -30,6 +30,8 @@ class GeometryTests(unittest.TestCase):
 class CombatTests(unittest.TestCase):
     def setUp(self):
         self.bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
+        self.bot.arena = BOT.Arena.__new__(BOT.Arena)
+        self.bot.arena.ok = False
         self.bot.damage_until = -1.0
         self.bot.damage_bearing = None
         self.bot.scan_yaw = 0.0
@@ -70,6 +72,36 @@ class CombatTests(unittest.TestCase):
         self.assertTrue(self.bot._combat(self.obs, None)[2])
         self.bot.damage_until = 4.0
         self.assertFalse(self.bot._combat(self.obs, None)[2])
+
+    def set_up_wall(self, top):
+        arena = self.bot.arena
+        arena.ok = True
+        arena.ground = lambda x, y: 0.0
+        arena.prisms = [{
+            "base": 0.0, "top": top,
+            "ring": [35, -5, 45, -5, 45, 5, 35, 5],
+            "holes": [], "bbox": (35.0, -5.0, 45.0, 5.0),
+        }]
+        arena.cells = {(1, -1): [0], (1, 0): [0]}
+
+    def test_does_not_fire_at_a_tracked_enemy_behind_a_wall(self):
+        self.set_up_wall(20.0)
+        self.mortar["cooldown"] = 0.0
+        self.me["aim"] = self.bot._direct_aim(self.me, self.target, 252.0)
+        self.assertEqual(self.bot._combat(self.obs, self.target)[1], [False, False])
+
+    def test_low_wall_blocks_gun_but_not_mortar_arc(self):
+        self.set_up_wall(8.0)
+        self.mortar["cooldown"] = 0.0
+        self.assertFalse(self.bot.arena.shot_clear(*self.bot._direct_line(self.me, self.target, 252.0)))
+        self.me["aim"] = self.bot._mortar_aim(self.me, self.target, self.mortar)
+        self.assertIsNotNone(self.me["aim"])
+        self.assertEqual(self.bot._combat(self.obs, self.target)[1], [False, True])
+
+    def test_selects_an_exposed_opponent_over_a_blocked_one(self):
+        self.set_up_wall(20.0)
+        exposed = dict(self.target, id=8, pos=[75, 30, 0])
+        self.assertEqual(self.bot._primary_enemy(self.obs, [self.target, exposed]), exposed)
 
 
 if __name__ == "__main__":

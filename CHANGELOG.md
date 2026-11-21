@@ -2,6 +2,11 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.6.0 - 2026-11-21
+
+- Check lead-corrected gun lines, beams, and mortar arcs against buildings and terrain before firing.
+- Prefer an opponent with a clear firing lane when the first choice is behind a solid obstacle.
+
 ## 0.5.0 - 2026-11-21
 
 - Return to the 0.1 survival and steering policy.

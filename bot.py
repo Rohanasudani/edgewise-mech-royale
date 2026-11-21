@@ -156,6 +156,31 @@ class Arena:
     def _nearby(self, x, y):
         return self.cells.get((math.floor(x / self.CELL), math.floor(y / self.CELL)), ())
 
+    def shot_clear(self, origin, endpoint, arc_rise=0.0):
+        """Sample the line or projectile arc against arena solids and terrain."""
+        if not self.ok:
+            return True
+        dx, dy, dz = (b - a for a, b in zip(origin, endpoint))
+        steps = max(2, math.ceil(math.hypot(dx, dy, dz) / 1.5))
+        for step in range(1, steps):
+            fraction = step / steps
+            x = origin[0] + dx * fraction
+            y = origin[1] + dy * fraction
+            z = origin[2] + dz * fraction + arc_rise * fraction * (1.0 - fraction)
+            if self.ground(x, y) > z + 0.25:
+                return False
+            for index in self._nearby(x, y):
+                prism = self.prisms[index]
+                min_x, min_y, max_x, max_y = prism["bbox"]
+                if (
+                    prism["base"] + 0.1 < z < prism["top"] - 0.1
+                    and min_x < x < max_x and min_y < y < max_y
+                    and point_in_ring(x, y, prism["ring"])
+                    and not any(point_in_ring(x, y, hole) for hole in prism["holes"])
+                ):
+                    return False
+        return True
+
     def blocked(self, x, y, feet_z, radius, height):
         if not self.ok:
             return False
@@ -238,7 +263,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v5"
+    name = "edgewise-v6"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -375,9 +400,10 @@ class RoyaleBot:
         return result, closest
 
     def _primary_enemy(self, obs, enemies):
-        if not enemies:
-            return None
-        pos = obs["self"]["pos"]
+        if len(enemies) < 2:
+            return enemies[0] if enemies else None
+        me = obs["self"]
+        pos = me["pos"]
         def score(enemy):
             value = distance2(pos, enemy["pos"])
             if enemy["id"] == self.attacker and obs["t"] < self.damage_until:
@@ -388,9 +414,13 @@ class RoyaleBot:
             if enemy.get("charging"):
                 value -= 18.0
             return value
-        return min(enemies, key=score)
+        ranked = sorted(enemies, key=score)
+        for enemy in ranked[:3]:
+            if self.arena.shot_clear(*self._direct_line(me, enemy)):
+                return enemy
+        return ranked[0]
 
-    def _direct_aim(self, me, target, speed=None):
+    def _direct_line(self, me, target, speed=None):
         muzzle = (me["pos"][0], me["pos"][1], me["pos"][2] + float(me["stats"].get("muzzle_height", 7.0)))
         if target["kind"] == "mech":
             center_height = 4.5 * (1.0 + 0.05 * target.get("cubes", 0))
@@ -405,8 +435,16 @@ class RoyaleBot:
                 predicted = tuple(point + rate * lead for point, rate in zip(target_pos, velocity))
                 flight = clamp((math.dist(muzzle, predicted) - barrel) / speed, 0.0, 1.2)
                 lead = flight + 0.05
-        dx, dy, dz = (point + rate * lead - origin for point, rate, origin in zip(target_pos, velocity, muzzle))
+        endpoint = tuple(point + rate * lead for point, rate in zip(target_pos, velocity))
+        return muzzle, endpoint
+
+    @staticmethod
+    def _aim_between(origin, endpoint):
+        dx, dy, dz = (b - a for a, b in zip(origin, endpoint))
         return [math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))]
+
+    def _direct_aim(self, me, target, speed=None):
+        return self._aim_between(*self._direct_line(me, target, speed))
 
     def _mortar_aim(self, me, target, weapon):
         muzzle = (me["pos"][0], me["pos"][1], me["pos"][2] + float(me["stats"].get("height", 9.0)) + 0.5)
@@ -429,6 +467,18 @@ class RoyaleBot:
                 target["pos"][2] + target["vel"][2] * min(0.3, flight) + 2.5,
             ]
             solution = [math.atan2(dy, dx), pitch]
+        yaw, pitch = solution
+        if not me["stats"].get("min_pitch", -0.7) <= pitch <= me["stats"].get("max_pitch", 1.3):
+            return None
+        direction = (math.cos(yaw) * math.cos(pitch), math.sin(yaw) * math.cos(pitch), math.sin(pitch))
+        barrel = float(me["stats"].get("radius", 2.5)) + 0.5
+        origin = tuple(point + barrel * component for point, component in zip(muzzle, direction))
+        flight = max(0.0, flight - barrel / speed)
+        endpoint = [point + speed * component * flight for point, component in zip(origin, direction)]
+        drop = 0.5 * gravity * flight ** 2
+        endpoint[2] -= drop
+        if not self.arena.shot_clear(muzzle, origin) or not self.arena.shot_clear(origin, endpoint, drop):
+            return None
         return solution
 
     def _combat(self, obs, target):
@@ -449,7 +499,8 @@ class RoyaleBot:
             return [self.scan_yaw, 0.0], fire, reload_now
 
         distance = distance2(me["pos"], target["pos"])
-        gun_aim = self._direct_aim(me, target, float(gun["stats"]["speed"]))
+        gun_line = self._direct_line(me, target, float(gun["stats"]["speed"]))
+        gun_aim = self._aim_between(*gun_line)
         aim = gun_aim
 
         def aligned(direction):
@@ -459,14 +510,16 @@ class RoyaleBot:
             slot, weapon = slots["laser"]
             charge = float(weapon.get("charge", 0.0))
             stats = weapon["stats"]
-            laser_aim = self._direct_aim(me, target)
+            laser_line = self._direct_line(me, target)
+            laser_aim = self._aim_between(*laser_line)
+            clear = self.arena.shot_clear(*laser_line)
             if charge > 0.0:
                 full = float(stats["charge"])
                 if charge >= full - 0.15:
                     aim = laser_aim
-                fire[slot] = charge < full - 0.05 or not aligned(laser_aim)
+                fire[slot] = charge < full - 0.05 or not (clear and aligned(laser_aim))
             elif weapon.get("cooldown", 0.0) <= 0.05 and distance <= stats["range"]:
-                fire[slot] = aligned(laser_aim)
+                fire[slot] = clear and aligned(laser_aim)
         elif "mortar" in slots and target["kind"] == "mech":
             slot, weapon = slots["mortar"]
             splash = float(weapon["stats"].get("splash_radius", 7.0))
@@ -479,19 +532,22 @@ class RoyaleBot:
         elif "lightning" in slots and target["kind"] == "mech":
             slot, weapon = slots["lightning"]
             stats = weapon["stats"]
-            yaw = self._direct_aim(me, target)[0]
+            lightning_line = self._direct_line(me, target)
+            yaw = self._aim_between(*lightning_line)[0]
             cone = math.radians(stats["cone_deg"]) * 0.5
             fire[slot] = (
                 distance < stats["range"] * 0.97 and me["energy"] >= stats["energy"] + 8.0
                 and weapon.get("cooldown", 0.0) <= 0.1
                 and abs(angle_diff(me["aim"][0], yaw)) < cone * 0.85
                 and abs(angle_diff(aim[0], yaw)) < cone * 0.85
+                and self.arena.shot_clear(*lightning_line)
             )
 
         compatible_aim = abs(angle_diff(aim[0], gun_aim[0])) < 0.015 and abs(aim[1] - gun_aim[1]) < 0.02
         fire[gun_slot] = (
             not reloading and ammo > 0 and compatible_aim and aligned(aim)
             and distance < gun["stats"].get("range", 230.0)
+            and self.arena.shot_clear(*gun_line)
         )
         reload_now = not reloading and (ammo == 0 or (ammo <= 2 and target["kind"] == "mech" and not compatible_aim))
         return aim, fire, reload_now
