@@ -202,7 +202,12 @@ class Arena:
             fraction = 1.0 - (step * step_length) / distance
             x = threat[0] + (target[0] - threat[0]) * fraction
             y = threat[1] + (target[1] - threat[1]) * fraction
-            solid = point_in_ring(x, y, prism["ring"]) and not any(point_in_ring(x, y, hole) for hole in prism["holes"])
+            z = threat[2] + 7.0 + (target[2] + 5.0 - threat[2] - 7.0) * fraction
+            solid = (
+                prism["base"] + 0.2 <= z <= prism["top"] - 0.2
+                and point_in_ring(x, y, prism["ring"])
+                and not any(point_in_ring(x, y, hole) for hole in prism["holes"])
+            )
             if solid:
                 run += 1
                 best_run = max(best_run, run)
@@ -210,8 +215,62 @@ class Arena:
                 run = 0
         return best_run * step_length
 
+    def _walkable(self, start, end, radius, height):
+        """Check body clearance and terrain along a straight ground leg."""
+        distance = distance2(start, end)
+        if distance < EPS:
+            return True
+        steps = math.ceil(distance / 1.8)
+        step_length = distance / steps
+        last_ground = self.ground(start[0], start[1])
+        for step in range(1, steps + 1):
+            fraction = step / steps
+            x = start[0] + (end[0] - start[0]) * fraction
+            y = start[1] + (end[1] - start[1]) * fraction
+            ground = self.ground(x, y)
+            if abs(ground - last_ground) > max(self.max_step, self.max_slope * step_length):
+                return False
+            if self.blocked(x, y, ground, radius + 0.35, height):
+                return False
+            last_ground = ground
+        return True
+
+    def _cover_route(self, start, target, prism, radius, height, zone):
+        """Check a direct route or short detours around the cover building."""
+        if self._walkable(start, target, radius, height):
+            return (target,), distance2(start, target)
+        min_x, min_y, max_x, max_y = prism["bbox"]
+        pad = radius + 1.9
+        corners = (
+            (min_x - pad, min_y - pad), (max_x + pad, min_y - pad),
+            (max_x + pad, max_y + pad), (min_x - pad, max_y + pad),
+        )
+        safe = {point for point in corners if distance2(point, zone[:2]) <= zone[2] - radius - 5.0}
+        routes = [(point, target) for point in corners if point in safe]
+        for index, point in enumerate(corners):
+            for other in (corners[index - 1], corners[(index + 1) % len(corners)]):
+                if point in safe and other in safe:
+                    routes.append((point, other, target))
+        options = []
+        for route in routes:
+            legs = tuple(zip((start, *route[:-1]), route))
+            length = sum(distance2(a, b) for a, b in legs)
+            if length <= 69.0:
+                options.append((length, route, legs))
+        checked = {}
+        for length, route, legs in sorted(options):
+            for a, b in legs:
+                key = (tuple(a[:2]), tuple(b[:2]))
+                if key not in checked:
+                    checked[key] = self._walkable(a, b, radius, height)
+                if not checked[key]:
+                    break
+            else:
+                return route, length
+        return None
+
     def cover_target(self, pos, threat, radius, height, zone):
-        """Find a nearby point whose building wall blocks the pursuing mech."""
+        """Find reachable ground cover with solid geometry in the firing line."""
         if not self.ok:
             return None
         cell_x, cell_y = math.floor(pos[0] / self.CELL), math.floor(pos[1] / self.CELL)
@@ -220,14 +279,10 @@ class Arena:
             for gy in range(cell_y - 3, cell_y + 4):
                 nearby.update(self.cells.get((gx, gy), ()))
 
-        shot_height = (pos[2] + threat[2]) * 0.5 + min(7.0, height * 0.7)
-        best_score = float("inf")
-        best = None
+        candidates = []
         for index in nearby:
             prism = self.prisms[index]
             if prism["kind"] not in {"building", "stadium"}:
-                continue
-            if shot_height < prism["base"] + 0.2 or shot_height > prism["top"] - 0.2:
                 continue
             for wall, outward in prism["cover_edges"]:
                 toward_threat = (threat[0] - wall[0], threat[1] - wall[1])
@@ -235,7 +290,7 @@ class Arena:
                     continue
                 target = (wall[0] + outward[0] * (radius + 3.2), wall[1] + outward[1] * (radius + 3.2))
                 travel = distance2(pos, target)
-                if travel > 72.0:
+                if travel > 60.0:
                     continue
                 if zone[2] - distance2(target, zone[:2]) < radius + 8.0:
                     continue
@@ -244,14 +299,25 @@ class Arena:
                     continue
                 if self.blocked(target[0], target[1], target_ground, radius + 0.25, height):
                     continue
-                depth = self._cover_depth(prism, threat, target)
+                depth = self._cover_depth(prism, threat, (*target, target_ground))
                 if depth < max(8.0, radius * 2.5):
                     continue
                 enemy_distance = distance2(threat, target)
                 score = travel - min(depth, 18.0) * 0.9 - min(enemy_distance, 120.0) * 0.035
-                if score < best_score:
-                    best_score = score
-                    best = {"target": target, "index": index, "depth": depth}
+                candidates.append((score, index, target, travel, depth))
+        best_score = float("inf")
+        best = None
+        for score, index, target, direct_distance, depth in sorted(candidates)[:12]:
+            if score >= best_score:
+                break
+            route = self._cover_route(pos, target, self.prisms[index], radius, height, zone)
+            if route is None:
+                continue
+            waypoints, length = route
+            score += (length - direct_distance) * 1.2
+            if score < best_score:
+                best_score = score
+                best = {"target": target, "index": index, "depth": depth, "waypoints": waypoints}
         return best
 
     def blocked(self, x, y, feet_z, radius, height):
@@ -336,7 +402,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v4"
+    name = "edgewise-v4.1"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -351,6 +417,7 @@ class RoyaleBot:
         self.damage_bearing = None
         self.damage_source = None
         self.damage_until = -1.0
+        self.last_combat = -math.inf
         self.attacker = None
         self.cover_goal = None
         self.cover_cooldown = -1.0
@@ -579,7 +646,7 @@ class RoyaleBot:
         return aim, fire, reload_now
 
     def _cover_behavior(self, obs, target, urgent, current_margin, current_zone):
-        """Commit to geometry-verified hard cover while the squad has pressure."""
+        """Follow a checked cover route and time recovery from combat events."""
         me = obs["self"]
         pos = me["pos"]
         now = float(obs["t"])
@@ -602,50 +669,95 @@ class RoyaleBot:
         if self.cover_goal is not None:
             goal = self.cover_goal
             goal_margin = current_zone[2] - distance2(goal["target"], current_zone[:2])
-            expired = now - goal["started"] > 5.5 or goal_margin < radius + 6.0
-            exposed = False
-            if threat_pos is not None and now - goal["started"] > 0.9:
-                prism = self.arena.prisms[goal["index"]]
-                exposed = self.arena._cover_depth(prism, threat_pos, goal["target"]) < max(8.0, radius * 2.5)
-            if expired or exposed:
-                self.cover_goal = None
-                self.cover_cooldown = now + (0.4 if exposed else 1.5)
-            else:
-                remaining = distance2(pos, goal["target"])
-                if remaining <= radius + 1.0:
-                    if target is None:
-                        return {"hold": True, "direction": (0.0, 0.0), "speed": 0.0}
-                    self.cover_goal = None
-                    self.cover_cooldown = now + 0.4
-                else:
-                    return {
-                        "hold": False,
-                        "direction": unit((goal["target"][0] - pos[0], goal["target"][1] - pos[1])),
-                        "speed": 1.0,
-                    }
+            waypoint = goal["waypoints"][goal["next_waypoint"]]
+            waypoint_margin = current_zone[2] - distance2(waypoint, current_zone[:2])
+            if min(goal_margin, waypoint_margin) >= radius + 5.0:
+                if threat_pos is not None:
+                    goal["threat"] = threat_pos
+                decision = self._follow_cover(me, goal, target, now, radius, height)
+                if decision is not None:
+                    return decision
+            self.cover_goal = None
+            self.cover_cooldown = now + 1.5
+            return None
 
         pressure = threat_pos is not None and (
-            now < self.damage_until or (target is not None and distance2(pos, target["pos"]) < 145.0)
+            now < self.damage_until or (target is not None and distance2(pos, target["pos"]) < 105.0)
         )
-        if not pressure or now < self.cover_cooldown:
+        if not pressure or now < self.cover_cooldown or not me["grounded"]:
             return None
         goal = self.arena.cover_target(pos, threat_pos, radius, height, current_zone)
         if goal is None:
             self.cover_cooldown = now + 1.2
             return None
-        goal["started"] = now
+        goal.update(
+            started=now, next_waypoint=0, progress_at=now, remaining=math.inf,
+            arrived=None, threat=threat_pos, check_at=now + 0.4,
+        )
         self.cover_goal = goal
-        return {
-            "hold": False,
-            "direction": unit((goal["target"][0] - pos[0], goal["target"][1] - pos[1])),
-            "speed": 1.0,
-        }
+        decision = self._follow_cover(me, goal, target, now, radius, height)
+        if decision is None:
+            self.cover_goal = None
+            self.cover_cooldown = now + 1.2
+        return decision
+
+    def _follow_cover(self, me, goal, target, now, radius, height):
+        pos = me["pos"]
+        prism = self.arena.prisms[goal["index"]]
+        route = goal["waypoints"]
+        next_waypoint = goal["next_waypoint"]
+        waypoint = route[next_waypoint]
+        remaining = distance2(pos, waypoint)
+        if remaining <= 1.5 and next_waypoint < len(route) - 1:
+            goal["next_waypoint"] += 1
+            waypoint = route[next_waypoint + 1]
+            remaining = distance2(pos, waypoint)
+            goal["remaining"] = math.inf
+
+        needs_repair = target is None and me["hp"] < me["max_hp"] * 0.98
+        sheltered = needs_repair and self.arena._cover_depth(
+            prism, goal["threat"], pos
+        ) >= max(8.0, radius * 2.5)
+        if sheltered:
+            if goal["arrived"] is None:
+                goal["arrived"] = now
+            if self.last_combat > goal["arrived"]:
+                return None
+            regen_delay = float(me["stats"].get("regen_delay", 5.0))
+            hold_until = max(goal["arrived"] + 0.5, self.last_combat + regen_delay + 1.5)
+            if now < hold_until and now - goal["arrived"] < regen_delay + 2.0:
+                return {"hold": True, "direction": (0.0, 0.0), "speed": 0.0}
+            return None
+        if goal["arrived"] is not None or remaining <= 1.5:
+            return None
+
+        if now - goal["started"] > 7.0:
+            return None
+        if now >= goal["check_at"]:
+            end = goal["target"]
+            end_feet = (*end, self.arena.ground(*end))
+            if self.arena._cover_depth(prism, goal["threat"], end_feet) < max(8.0, radius * 2.5):
+                return None
+            goal["check_at"] = now + 0.4
+        if remaining < goal["remaining"] - 0.7:
+            goal["remaining"] = remaining
+            goal["progress_at"] = now
+        elif now - goal["progress_at"] > 0.9:
+            return None
+        direction = unit((waypoint[0] - pos[0], waypoint[1] - pos[1]))
+        lookahead = min(remaining, 4.0)
+        probe = (pos[0] + direction[0] * lookahead, pos[1] + direction[1] * lookahead)
+        if not self.arena._walkable(pos, probe, radius, height):
+            return None
+        return {"hold": False, "direction": direction, "speed": min(1.0, remaining / 4.5)}
 
     def act(self, obs):
         me = obs["self"]
         pos = me["pos"]
         now = float(obs["t"])
         for event in obs.get("events", []):
+            if event.get("type") in {"damaged", "hit"}:
+                self.last_combat = now
             if event.get("type") == "damaged" and event.get("bearing") is not None:
                 self.damage_bearing = float(event["bearing"])
                 self.damage_source = [
@@ -730,6 +842,10 @@ class RoyaleBot:
         if cover_hold and not projectile_danger:
             move = [0.0, 0.0]
             boost = False
+            jump = False
+        elif cover_routing and not projectile_danger:
+            move = [component * cover["speed"] for component in cover["direction"]]
+            boost = boost and cover["speed"] >= 0.9
             jump = False
         if jump:
             self.last_jump = now

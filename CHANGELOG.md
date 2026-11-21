@@ -2,6 +2,12 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.4.1
+
+- Check ground clearance along cover routes and follow waypoints around obstacles.
+- Account for elevation when evaluating building cover.
+- Time repairs from the last damage dealt or received, with separate limits for travel and holding cover.
+
 ## 0.4.0 - 2026-11-20
 
 - Return to the 0.1 combat and energy behavior after the rooftop experiment underperformed.
