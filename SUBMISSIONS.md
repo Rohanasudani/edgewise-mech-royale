@@ -1,6 +1,6 @@
 # Practice submission ledger
 
-The repository must be public when Builders fetches a submission. After scoring, Builders keeps a copy of the scored commit for the final. The scorer accepts only one active entry per team, allows four entries per rolling hour, and counts rejected entries against that limit.
+The repository must be public when Builders fetches a submission. After scoring, Builders keeps a copy of the scored commit for the final. The live form shows the current hourly quota and remaining entries. Rejected entries count against that quota.
 
 | Tag | Commit | Submitted (ET) | Hypothesis | Practice score | Build/check | Notes |
 | --- | --- | --- | --- | ---: | --- | --- |
@@ -15,6 +15,7 @@ The repository must be public when Builders fetches a submission. After scoring,
 | `submission-09` | `6ab78fc` | 2026-11-21 12:47 PM ET | Finish favorable fights and turn safe cube pickups into upgrades. | 2.60 | Passed and scored | Receipt `BB-1A3D6C8E`; selected as best entry |
 | `submission-10` | `d51fe62` | 2026-11-21 1:06 PM ET | Stay grounded while dodging, preserve boost energy, and prioritize urgent zone movement. | 3.25 | Passed and scored | Receipt `BB-FB96DB1B`; selected as best entry |
 | `submission-11` | `eb5aff3` | 2026-11-21 1:15 PM ET | Compare reachable ground movement against multiple incoming shots to avoid crossfire. | 3.48 | Passed and scored | Receipt `BB-0289A4D0`; selected as best entry |
+| `submission-12` | `4aa5d58` | 2026-11-21 7:03 PM ET | Route around the zone's obstacles, build a second-weapon loadout, and press exposed opponents. | 4.40 | Passed and scored | Receipt `BB-2CC8566A`; selected as best entry |
 
 ## Candidate checklist
 
