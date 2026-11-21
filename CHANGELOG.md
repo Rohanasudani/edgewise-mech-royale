@@ -2,6 +2,11 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.12.0 - 2026-11-21
+
+- Route around arena obstacles before the zone closes and use the same ground graph for contested loot approaches.
+- Build a laser and lightning loadout where possible and press favorable fights at weapon-specific ranges.
+
 ## 0.11.0 - 2026-11-21
 
 - Compare reachable ground movement against several incoming shots while preserving progress toward a closing zone.

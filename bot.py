@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from array import array
 from collections import defaultdict, deque
+import heapq
 import json
 import math
 import os
@@ -16,6 +17,7 @@ import queue
 import random
 import sys
 import threading
+import time
 import traceback
 
 
@@ -105,6 +107,7 @@ class Arena:
             map_dir = hello["map"]["dir"]
             with open(os.path.join(map_dir, "v2", "world.json"), "r", encoding="utf-8") as handle:
                 world = json.load(handle)
+            self.bounds = world["bounds"]
             self.terrain = world["terrain"]
             raw = array("h")
             with open(os.path.join(map_dir, "v2", self.terrain["file"]), "rb") as handle:
@@ -258,6 +261,88 @@ class Arena:
         return (math.cos(best), math.sin(best)), self.direction_clear(pos, heading, radius, height)
 
 
+class GroundRoutes:
+    """Find walkable routes across the arena using the static ground layer."""
+
+    SPACING = 7.0
+    RADIUS = 3.0
+    HEIGHT = 9.0
+
+    def __init__(self, arena):
+        self.arena = arena
+        self.points = {}
+        self.links = {}
+        if not arena.ok:
+            return
+        spacing = self.SPACING
+        bounds = arena.bounds
+        for ix in range(math.ceil((bounds["minX"] + self.RADIUS) / spacing),
+                        math.floor((bounds["maxX"] - self.RADIUS) / spacing) + 1):
+            x = ix * spacing
+            for iy in range(math.ceil((bounds["minY"] + self.RADIUS) / spacing),
+                            math.floor((bounds["maxY"] - self.RADIUS) / spacing) + 1):
+                y = iy * spacing
+                z = arena.ground(x, y)
+                if not arena.blocked(x, y, z, self.RADIUS, self.HEIGHT):
+                    self.points[ix, iy] = (x, y, z)
+                    self.links[ix, iy] = []
+        for (ix, iy), start in self.points.items():
+            for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+                neighbor = (ix + dx, iy + dy)
+                end = self.points.get(neighbor)
+                if end is None or not arena.ground_leg_clear(start, end, self.RADIUS, self.HEIGHT):
+                    continue
+                cost = distance2(start, end) + 0.23 * abs(end[2] - start[2])
+                self.links[ix, iy].append((neighbor, cost))
+                self.links[neighbor].append(((ix, iy), cost))
+
+    def route(self, origin, center, radius):
+        if not self.points or abs(origin[2] - self.arena.ground(*origin[:2])) > 2.2:
+            return []
+        deadline = time.perf_counter() + 0.014
+        spacing = self.SPACING
+        ix, iy = (round(value / spacing) for value in origin[:2])
+        starts = [(ix + dx, iy + dy) for dx in range(-2, 3) for dy in range(-2, 3)]
+        starts = sorted((node for node in starts if self.links.get(node)),
+                        key=lambda node: distance2(origin, self.points[node]))
+        start = next((node for node in starts if self.arena.ground_leg_clear(
+            origin, self.points[node], self.RADIUS, self.HEIGHT)), None)
+        if start is None:
+            return []
+
+        def remaining(node):
+            return max(0.0, distance2(self.points[node], center) - radius)
+
+        costs = {start: 0.0}
+        parents = {start: None}
+        initial_gap = remaining(start)
+        queue = [(initial_gap * 1.12, 0.0, start)]
+        best = start
+        best_gap = initial_gap
+        while queue and time.perf_counter() < deadline:
+            _, cost, node = heapq.heappop(queue)
+            if cost != costs[node]:
+                continue
+            gap = remaining(node)
+            if gap < best_gap:
+                best, best_gap = node, gap
+            if gap == 0.0:
+                break
+            for neighbor, step in self.links[node]:
+                travel = cost + step
+                if travel < costs.get(neighbor, math.inf):
+                    costs[neighbor] = travel
+                    parents[neighbor] = node
+                    heapq.heappush(queue, (travel + 1.12 * remaining(neighbor), travel, neighbor))
+        if best_gap > 0.0 and initial_gap - best_gap < spacing:
+            return []
+        route = []
+        while best is not None:
+            route.append(self.points[best])
+            best = parents[best]
+        return route[::-1]
+
+
 UPGRADE_SCORE = {
     "armor": 125,
     "plating": 120,
@@ -285,12 +370,20 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v11"
+    name = "edgewise-v12"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
         self.rng = random.Random(int(hello.get("seed", 0)))
         self.arena = Arena(hello)
+        self.routes = GroundRoutes(self.arena)
+        self.zone_route = deque()
+        self.zone_route_goal = None
+        self.zone_route_retry = -1.0
+        self.weapon_memory = {}
+        self.weapon_goal = None
+        self.weapon_route = deque()
+        self.weapon_route_retry = -1.0
         self.last_move = (0.0, 0.0)
         self.last_pos = None
         self.last_t = 0.0
@@ -300,7 +393,6 @@ class RoyaleBot:
         self.damage_bearing = None
         self.damage_until = -1.0
         self.attacker = None
-        self.damage_window = deque()
         self.last_kill = -math.inf
         self.escape_boost = False
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
@@ -326,16 +418,11 @@ class RoyaleBot:
                 self.damage_until = -1.0
         for event in events:
             kind = event.get("type")
-            if kind == "hit" and event.get("target") is not None:
-                self.damage_window.append((now, event["target"], float(event["amount"])))
-            elif kind == "damaged" and event.get("by") not in defeated:
-                self.damage_window.append((now, event.get("by"), -float(event["amount"])))
+            if kind == "damaged" and event.get("by") not in defeated:
                 if event.get("bearing") is not None:
                     self.damage_bearing = float(event["bearing"])
                     self.damage_until = now + 3.2
                     self.attacker = event.get("by")
-        while self.damage_window and now - self.damage_window[0][0] > 3.0:
-            self.damage_window.popleft()
 
     def _safe_ground_goal(self, obs, goal, urgent=False):
         me = obs["self"]
@@ -354,59 +441,39 @@ class RoyaleBot:
         )
 
     def _duel_vector(self, obs, target, enemies, urgent, current_margin):
-        """Keep a safe, favorable one-on-one fight inside weapon range."""
-        if target is None or urgent or current_margin < 27.0:
+        """Keep pressure on an exposed pursuer when the trade is sustainable."""
+        if target is None or urgent or current_margin < 28.0:
             return None
         me = obs["self"]
         pos = me["pos"]
         foe = target["pos"]
         distance = distance2(pos, foe)
-        enemy_hp = target.get("hp")
-        if enemy_hp is None or not 14.0 <= distance <= 105.0:
+        if not 13.0 < distance < 152.0 or me["hp"] < me["max_hp"] * 0.42:
             return None
-        minimum_health = 0.52 if enemy_hp <= 220.0 else 0.65
-        if me["hp"] < me["max_hp"] * minimum_health:
+        if obs["t"] - self.last_kill < 2.0 and any(distance2(pos, c["pos"]) < 16.0 for c in obs.get("cubes", ())):
             return None
-        if any(
-            enemy["id"] != target["id"] and min(distance2(pos, enemy["pos"]), distance2(foe, enemy["pos"])) < 88.0
-            for enemy in enemies
-        ):
+        support = sum(enemy["id"] != target["id"] and distance2(pos, enemy["pos"]) < 62.0 for enemy in enemies)
+        if support > 1 or (support and obs["t"] < self.damage_until and self.attacker != target["id"]):
             return None
-        if obs["t"] < self.damage_until and self.attacker not in (None, target["id"]):
-            return None
-        zone = obs["zone"]
-        if self._inside_margin(foe, zone["center"], zone["radius"]) < 19.0:
-            return None
-
         weapons = self._weapon_slots(me)
-        if not self.arena.shot_clear(*self._direct_line(me, target)):
+        enemy_hp = target.get("hp")
+        finishing = enemy_hp is not None and enemy_hp < min(420.0, me["hp"] * 0.55)
+        if finishing and support:
             return None
-        outgoing = sum(amount for _, identifier, amount in self.damage_window if identifier == target["id"] and amount > 0)
-        incoming = -sum(amount for _, _, amount in self.damage_window if amount < 0)
-        enemy_weapons = target.get("weapons") or ()
-        early_advantage = (
-            len(weapons) > 1 and set(enemy_weapons) == {"gun"}
-            and me["hp"] > me["max_hp"] * 0.78 and enemy_hp <= me["hp"] * 1.05
-        )
-        finishing = outgoing > 0 and enemy_hp <= min(335.0, me["hp"] * 0.67) and incoming < me["hp"] * 0.36
-        winning_trade = outgoing >= 100.0 and outgoing > incoming * 1.25 and enemy_hp < me["hp"] * 0.80
-        if not (early_advantage or finishing or winning_trade):
+        if len(weapons) == 1 and enemy_hp is not None and enemy_hp > me["hp"] * 1.18:
             return None
-        preferred = 50.0
-        if "lightning" in weapons and me["energy"] >= 27.0:
-            preferred = float(weapons["lightning"][1]["stats"]["range"]) * 0.76
-        elif "laser" in weapons:
-            preferred = 62.0
-        if finishing and "lightning" not in enemy_weapons:
-            preferred = min(preferred, 46.0)
-        if "lightning" in enemy_weapons and "lightning" not in weapons:
-            preferred = max(57.0, preferred)
+        if not finishing and not self.arena.shot_clear(*self._direct_line(me, target)):
+            return None
+        preferred = 91.0 if "laser" in weapons else 66.0
+        if "lightning" in weapons and me["energy"] > 19.0 and not support:
+            if "laser" not in weapons or "laser" in (target.get("weapons") or ()) or finishing:
+                preferred = 34.0
+        if finishing:
+            preferred = min(preferred, 36.0)
         away = unit((pos[0] - foe[0], pos[1] - foe[1]))
-        radial = clamp((preferred - distance) / 20.0, -1.0, 0.9)
+        radial = clamp((preferred - distance) / 25.0, -1.4 if finishing else -0.96, 1.15)
         tangent = (-away[1] * self.turn_sign, away[0] * self.turn_sign)
-        direction = unit((tangent[0] * 0.80 + away[0] * radial * 1.40,
-                          tangent[1] * 0.80 + away[1] * radial * 1.40))
-        return direction
+        return unit((0.76 * tangent[0] + radial * away[0], 0.76 * tangent[1] + radial * away[1]))
 
     def _safe_cube(self, obs, enemies, urgent, danger):
         """Collect nearby rewards only when our arrival beats nearby opponents."""
@@ -455,7 +522,10 @@ class RoyaleBot:
             for sound in obs.get("sounds", ())
         ):
             return None
-        gun = self._weapon_slots(me)["gun"][1]
+        slot = self._weapon_slots(me).get("gun")
+        if slot is None:
+            return None
+        gun = slot[1]
         if gun.get("ammo", 12) <= 1 or gun.get("reload", 0.0) > 0.25:
             return None
         candidates = []
@@ -479,14 +549,86 @@ class RoyaleBot:
         zone = obs["zone"]
         choices = [
             pickup for pickup in obs.get("pickups", [])
-            if pickup["kind"] != "gun" and pickup["kind"] not in held
+            if pickup["kind"] in {"laser", "lightning"} and pickup["kind"] not in held
             and abs(pickup["pos"][2] - pos[2]) <= 4.0
             and self._inside_margin(pickup["pos"], zone["center"], zone["radius"]) > 10.0
         ]
         if not choices:
             return None
-        preference = {"laser": 8.0, "mortar": 5.0, "lightning": 0.0}
+        preference = {"laser": 8.0, "lightning": 0.0}
         return min(choices, key=lambda p: distance2(pos, p["pos"]) - preference.get(p["kind"], 0.0))
+
+    def _arm_action(self, obs, enemies, urgent, current_margin, next_margin, danger, action):
+        """Reach an uncontested secondary weapon or trade the gun for a second one."""
+        me, now = obs["self"], obs["t"]
+        pos = me["pos"]
+        held = self._weapon_slots(me)
+        if "gun" not in held:
+            return
+        visible = {p["id"]: p for p in obs.get("pickups", ()) if p["kind"] in {"laser", "lightning"}}
+        self.weapon_memory.update((identifier, (now, pickup)) for identifier, pickup in visible.items())
+        self.weapon_memory = {
+            identifier: (seen, pickup) for identifier, (seen, pickup) in self.weapon_memory.items()
+            if now - seen < 28.0 and (identifier in visible or distance2(pos, pickup["pos"]) > 9.0)
+        }
+        reachable = [p for p in visible.values() if p["kind"] not in held
+                     and distance2(p["pos"], pos) <= self.pickup_radius and abs(p["pos"][2] - pos[2]) < 4.0]
+        if reachable:
+            pickup = min(reachable, key=lambda p: (p["kind"] != "laser", distance2(pos, p["pos"])))
+            action["take"] = pickup["id"]
+            if len(held) == 2:
+                action["drop"] = held["gun"][0]
+            return
+        if not self.arena.ok or urgent or current_margin < 29.0 or not me["grounded"] or action["jump"] or danger:
+            return
+        nearest = min((distance2(pos, enemy["pos"]) for enemy in enemies), default=250.0)
+        if nearest < (40.0 if len(held) == 1 else 54.0) or me["hp"] < 0.47 * me["max_hp"]:
+            return
+        max_travel = min(86.0 if len(held) == 1 else 42.0, (nearest - 29.0) * 0.84)
+        zone = obs["zone"]
+        choices = []
+        for identifier, (_, pickup) in self.weapon_memory.items():
+            point = pickup["pos"]
+            gap = distance2(pos, point)
+            if pickup["kind"] in held or gap > max_travel or abs(point[2] - self.arena.ground(*point[:2])) > 3.3:
+                continue
+            if self._inside_margin(point, zone["center"], zone["radius"]) < 21.0:
+                continue
+            if next_margin < 35.0 and self._inside_margin(point, zone["next_center"], zone["next_radius"]) < next_margin - 21.0:
+                continue
+            if any(distance2(point, foe["pos"]) < gap * 0.85 + 12.0 for foe in enemies):
+                continue
+            cost = gap - (21.0 if pickup["kind"] == "laser" else 0.0) - (8.0 if identifier == self.weapon_goal else 0.0)
+            choices.append((cost, identifier, point))
+        if not choices:
+            self.weapon_goal = None
+            self.weapon_route.clear()
+            return
+        _, identifier, point = min(choices)
+        if identifier != self.weapon_goal:
+            self.weapon_goal = identifier
+            self.weapon_route.clear()
+            self.weapon_route_retry = -1.0
+        radius = me["stats"].get("radius", 2.5)
+        height = me["stats"].get("height", 9.0)
+        if self.arena.ground_leg_clear(pos, point, radius, height):
+            waypoint = point
+        else:
+            if not self.weapon_route and now >= self.weapon_route_retry:
+                self.weapon_route.extend(self.routes.route(pos, point[:2], 6.2))
+                self.weapon_route_retry = now + 1.0
+            while self.weapon_route and distance2(pos, self.weapon_route[0]) < 4.4:
+                self.weapon_route.popleft()
+            if not self.weapon_route or distance2(pos, self.weapon_route[0]) > 22.0:
+                return
+            waypoint = self.weapon_route[0]
+        direction = unit((waypoint[0] - pos[0], waypoint[1] - pos[1]))
+        steered, _ = self.arena.steer(pos, direction, action["move"], radius, height, (*zone["center"], zone["radius"]))
+        gap = distance2(pos, point)
+        speed = 0.60 if gap < 8.0 else 1.0
+        action["move"] = [steered[0] * speed, steered[1] * speed]
+        if nearest > 135.0 and me["energy"] > 70.0 and gap > 26.0:
+            action["boost"] = True
 
     def _zone_plan(self, obs):
         me = obs["self"]
@@ -516,6 +658,58 @@ class RoyaleBot:
             tangent = (-radial[1] * self.turn_sign, radial[0] * self.turn_sign)
             vector = unit((tangent[0] - radial[0] * clamp(radial_error / 35.0, -1.0, 1.0), tangent[1] - radial[1] * clamp(radial_error / 35.0, -1.0, 1.0)))
         return vector, urgent, current_margin, next_margin
+
+    def _zone_route_plan(self, obs, urgent, current_margin, next_margin):
+        """Start the rotation early enough to take a detour around arena solids."""
+        me, zone = obs["self"], obs["zone"]
+        pos, now = me["pos"], obs["t"]
+        if not self.arena.ok or not me["grounded"]:
+            return None, urgent
+        radius = me["stats"].get("radius", 2.5)
+        clearance = min(radius + 13.0, 0.40 * zone["next_radius"])
+        speed = me["stats"].get("walk_speed", 11.7)
+        debt = max(0.0, clearance - next_margin)
+        time_left = zone["shrink_end"] - now
+        outside = current_margin < radius + 3.0
+        heading = None
+        if outside or (debt > 0.0 and time_left < 25.0 + 1.7 * debt / speed):
+            use_current = outside and current_margin + 18.0 > next_margin
+            safe_center = tuple(zone["center"] if use_current else zone["next_center"])
+            safe_radius = max(4.0, (zone["radius"] if use_current else zone["next_radius"]) - clearance)
+            dx, dy = unit((safe_center[0] - pos[0], safe_center[1] - pos[1]))
+            length = min(34.0, max(2.0, distance2(pos, safe_center) - safe_radius))
+            point = (pos[0] + dx * length, pos[1] + dy * length)
+            target = (*point, self.arena.ground(*point))
+            goal = (safe_center, safe_radius)
+            if self.zone_route_goal is None or distance2(safe_center, self.zone_route_goal[0]) > 12.0 or (
+                abs(safe_radius - self.zone_route_goal[1]) > 14.0
+            ):
+                self.zone_route.clear()
+                self.zone_route_retry = -1.0
+            if not self.zone_route and now >= self.zone_route_retry and not self.arena.ground_leg_clear(
+                pos, target, GroundRoutes.RADIUS, GroundRoutes.HEIGHT
+            ):
+                self.zone_route.extend(self.routes.route(pos, safe_center, safe_radius))
+                self.zone_route_goal = goal
+                self.zone_route_retry = now + 0.8
+            while self.zone_route and distance2(pos, self.zone_route[0]) < 4.2:
+                self.zone_route.popleft()
+            while len(self.zone_route) > 1 and distance2(pos, self.zone_route[1]) < 27.0 and self.arena.ground_leg_clear(
+                pos, self.zone_route[1], GroundRoutes.RADIUS, GroundRoutes.HEIGHT
+            ):
+                self.zone_route.popleft()
+            if self.zone_route:
+                waypoint = self.zone_route[0]
+                if distance2(pos, waypoint) <= 29.0:
+                    heading = unit((waypoint[0] - pos[0], waypoint[1] - pos[1]))
+                else:
+                    self.zone_route.clear()
+            if heading is None:
+                heading = (dx, dy)
+            urgent = urgent or outside or time_left < 12.0 + debt / speed or bool(self.zone_route)
+        else:
+            self.zone_route.clear()
+        return heading, urgent
 
     def _projectile_dodge(self, obs):
         me = obs["self"]
@@ -782,9 +976,9 @@ class RoyaleBot:
         me = obs["self"]
         fire = [False, False]
         slots = self._weapon_slots(me)
-        gun_slot, gun = slots["gun"]
-        ammo = gun.get("ammo", 12)
-        reloading = gun.get("reload", 0.0) > 0.0
+        gun_slot, gun = slots.get("gun", (None, {}))
+        ammo = gun.get("ammo", 12) if gun else 0
+        reloading = not gun or gun.get("reload", 0.0) > 0.0
         if target is None:
             reload_now = not reloading and (ammo == 0 or (ammo <= 6 and obs["t"] >= self.damage_until))
             if self.damage_bearing is not None and obs["t"] < self.damage_until:
@@ -796,7 +990,7 @@ class RoyaleBot:
             return [self.scan_yaw, 0.0], fire, reload_now
 
         distance = distance2(me["pos"], target["pos"])
-        gun_line = self._direct_line(me, target, float(gun["stats"]["speed"]))
+        gun_line = self._direct_line(me, target, float(gun["stats"]["speed"]) if gun else None)
         gun_aim = self._aim_between(*gun_line)
         aim = gun_aim
 
@@ -826,14 +1020,14 @@ class RoyaleBot:
                 if mortar_aim is not None:
                     aim = mortar_aim
                     fire[slot] = aligned(aim)
-        elif "lightning" in slots and target["kind"] == "mech":
+        if "lightning" in slots and target["kind"] == "mech":
             slot, weapon = slots["lightning"]
             stats = weapon["stats"]
             lightning_line = self._direct_line(me, target)
             yaw = self._aim_between(*lightning_line)[0]
             cone = math.radians(stats["cone_deg"]) * 0.5
             fire[slot] = (
-                distance < stats["range"] * 0.97 and me["energy"] >= stats["energy"] + 8.0
+                distance < stats["range"] * 0.97 and me["energy"] >= stats["energy"] + (8.0 if gun else 5.0)
                 and weapon.get("cooldown", 0.0) <= 0.1
                 and abs(angle_diff(me["aim"][0], yaw)) < cone * 0.85
                 and abs(angle_diff(aim[0], yaw)) < cone * 0.85
@@ -841,11 +1035,12 @@ class RoyaleBot:
             )
 
         compatible_aim = abs(angle_diff(aim[0], gun_aim[0])) < 0.015 and abs(aim[1] - gun_aim[1]) < 0.02
-        fire[gun_slot] = (
-            not reloading and ammo > 0 and compatible_aim and aligned(aim)
-            and distance < gun["stats"].get("range", 230.0)
-            and self.arena.shot_clear(*gun_line)
-        )
+        if gun:
+            fire[gun_slot] = (
+                not reloading and ammo > 0 and compatible_aim and aligned(aim)
+                and distance < gun["stats"].get("range", 230.0)
+                and self.arena.shot_clear(*gun_line)
+            )
         reload_now = not reloading and (ammo == 0 or (ammo <= 2 and target["kind"] == "mech" and not compatible_aim))
         return aim, fire, reload_now
 
@@ -858,6 +1053,8 @@ class RoyaleBot:
         enemies = [actor for actor in obs.get("mechs", []) if actor["kind"] == "mech"]
         target = self._primary_enemy(obs, enemies)
         zone_vector, urgent, current_margin, next_margin = self._zone_plan(obs)
+        route_heading, urgent = self._zone_route_plan(obs, urgent, current_margin, next_margin)
+        zone_vector = route_heading or zone_vector
         threat, closest = self._threat_vector(obs, enemies)
         dodge, projectile_danger = self._projectile_dodge(obs)
         threatened = closest < 105.0 or now < self.damage_until or projectile_danger
@@ -976,7 +1173,9 @@ class RoyaleBot:
             if empty is not None:
                 action["take"] = pickup["id"]
 
-        self.last_move = tuple(move)
+        self._arm_action(obs, enemies, urgent, current_margin, next_margin, projectile_danger, action)
+
+        self.last_move = tuple(action["move"])
         self.last_pos = tuple(pos)
         self.last_t = now
         return action

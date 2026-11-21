@@ -27,6 +27,33 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(x, 0.6)
         self.assertAlmostEqual(y, 0.8)
 
+    def test_ground_route_finds_a_way_around_a_wall(self):
+        class FlatArena:
+            ok = True
+            bounds = {"minX": -35, "maxX": 35, "minY": -35, "maxY": 35}
+
+            @staticmethod
+            def ground(x, y):
+                return 0.0
+
+            @staticmethod
+            def blocked(x, y, z, radius, height):
+                return abs(x) < 4 + radius and abs(y) < 17 + radius
+
+            def ground_leg_clear(self, start, end, radius, height):
+                for i in range(1, 11):
+                    x, y, z = (a + (b - a) * i / 10 for a, b in zip(start, end))
+                    if self.blocked(x, y, z, radius, height):
+                        return False
+                return True
+
+        arena = FlatArena()
+        start, goal = (-21, 0, 0), (21, 0, 0)
+        route = BOT.GroundRoutes(arena).route(start, goal, 5)
+        self.assertFalse(arena.ground_leg_clear(start, goal, 3, 9))
+        self.assertGreaterEqual(max(abs(point[1]) for point in route), 21)
+        self.assertLessEqual(BOT.distance2(route[-1], goal), 5)
+
 
 class EvasionTests(unittest.TestCase):
     def setUp(self):
@@ -145,6 +172,17 @@ class CombatTests(unittest.TestCase):
         self.bot.damage_until = 4.0
         self.assertFalse(self.bot._combat(self.obs, None)[2])
 
+    def test_laser_and_lightning_can_fire_without_a_gun(self):
+        self.me.update(aim=[0.0, -0.08], energy=50)
+        self.me["weapons"] = [
+            {"kind": "laser", "charge": 0.75, "stats": {"charge": 0.75, "range": 280}},
+            {"kind": "lightning", "stats": {"range": 45, "energy": 3, "cone_deg": 30}},
+        ]
+        self.target["pos"] = [32, 0, 0]
+        _, fire, reload_now = self.bot._combat(self.obs, self.target)
+        self.assertEqual(fire, [False, True])
+        self.assertFalse(reload_now)
+
     def set_up_wall(self, top):
         arena = self.bot.arena
         arena.ok = True
@@ -181,12 +219,15 @@ class ProgressionTests(unittest.TestCase):
         self.bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
         self.bot.arena = BOT.Arena.__new__(BOT.Arena)
         self.bot.arena.ok = False
-        self.bot.damage_window = deque()
         self.bot.damage_bearing = None
         self.bot.damage_until = -1.0
         self.bot.attacker = None
         self.bot.last_kill = -math.inf
         self.bot.escape_boost = False
+        self.bot.weapon_memory = {}
+        self.bot.weapon_goal = None
+        self.bot.weapon_route = deque()
+        self.bot.weapon_route_retry = -1.0
         self.bot.turn_sign = 1.0
         self.obs = {
             "t": 5.0, "self": {
