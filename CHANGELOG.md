@@ -2,6 +2,13 @@
 
 All notable bot changes are recorded here. Practice submissions also belong in `SUBMISSIONS.md` with their exact Git commit and score.
 
+## 0.9.0 - 2026-11-21
+
+- Use recent damage and weapon availability to identify favorable isolated fights and stay within effective range.
+- Shorten laser charges when the projected damage is enough to finish a weak target.
+- Collect unclaimed power cubes along walkable approaches when nearby opponents cannot contest them.
+- Clear stale threat state on a confirmed kill and acquire early upgrades from safe nearby crates or drones.
+
 ## 0.8.0 - 2026-11-21
 
 - Restore the 0.6 opening after the early pickup experiment reduced practice placement.

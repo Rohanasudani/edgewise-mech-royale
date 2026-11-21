@@ -8,7 +8,7 @@ the generous hello budget, then keeps every decision small and deterministic.
 from __future__ import annotations
 
 from array import array
-from collections import defaultdict
+from collections import defaultdict, deque
 import json
 import math
 import os
@@ -217,6 +217,28 @@ class Arena:
                 return False
         return True
 
+    def ground_leg_clear(self, start, goal, radius, height):
+        """Check a short loot approach on the same ground layer."""
+        if not self.ok:
+            return True
+        if abs(start[2] - self.ground(start[0], start[1])) > 3.0:
+            return False
+        if abs(goal[2] - self.ground(goal[0], goal[1])) > 4.0:
+            return False
+        distance = distance2(start, goal)
+        steps = max(1, math.ceil(distance / 2.5))
+        max_rise = max(self.max_step, self.max_slope * distance / steps)
+        last_z = start[2]
+        for index in range(1, steps + 1):
+            fraction = index / steps
+            x = start[0] + (goal[0] - start[0]) * fraction
+            y = start[1] + (goal[1] - start[1]) * fraction
+            z = self.ground(x, y)
+            if abs(z - last_z) > max_rise or self.blocked(x, y, z, radius + 0.25, height):
+                return False
+            last_z = z
+        return True
+
     def steer(self, pos, desired, previous, radius, height, zone):
         heading = math.atan2(desired[1], desired[0])
         previous_heading = math.atan2(previous[1], previous[0]) if length2(previous) > 0.05 else heading
@@ -263,7 +285,7 @@ UPGRADE_SCORE = {
 
 
 class RoyaleBot:
-    name = "edgewise-v8"
+    name = "edgewise-v9"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -278,6 +300,8 @@ class RoyaleBot:
         self.damage_bearing = None
         self.damage_until = -1.0
         self.attacker = None
+        self.damage_window = deque()
+        self.last_kill = -math.inf
         self.turn_sign = 1.0 if self.rng.random() < 0.5 else -1.0
         self.pickup_radius = float(self.cfg["loot"]["pickup_radius"])
 
@@ -290,6 +314,160 @@ class RoyaleBot:
 
     def _weapon_slots(self, me):
         return {weapon["kind"]: (i, weapon) for i, weapon in enumerate(me["weapons"]) if weapon is not None}
+
+    def _record_combat(self, obs, now):
+        events = obs.get("events", ())
+        defeated = {event.get("target") for event in events if event.get("type") == "kill"}
+        if defeated:
+            self.last_kill = now
+            if self.attacker in defeated:
+                self.attacker = self.damage_bearing = None
+                self.damage_until = -1.0
+        for event in events:
+            kind = event.get("type")
+            if kind == "hit" and event.get("target") is not None:
+                self.damage_window.append((now, event["target"], float(event["amount"])))
+            elif kind == "damaged" and event.get("by") not in defeated:
+                self.damage_window.append((now, event.get("by"), -float(event["amount"])))
+                if event.get("bearing") is not None:
+                    self.damage_bearing = float(event["bearing"])
+                    self.damage_until = now + 3.2
+                    self.attacker = event.get("by")
+        while self.damage_window and now - self.damage_window[0][0] > 3.0:
+            self.damage_window.popleft()
+
+    def _safe_ground_goal(self, obs, goal, urgent=False):
+        me = obs["self"]
+        zone = obs["zone"]
+        future_margin = self._inside_margin(goal, zone["next_center"], zone["next_radius"])
+        needed = max(0.0, 10.0 - future_margin)
+        time_to_safety = (needed + distance2(me["pos"], goal)) / float(me["stats"].get("walk_speed", 11.7))
+        return (
+            not urgent and abs(goal[2] - me["pos"][2]) <= 3.8
+            and self._inside_margin(goal, zone["center"], zone["radius"]) >= 18.0
+            and (future_margin >= 10.0 or time_to_safety + 8.0 < zone["shrink_end"] - obs["t"])
+            and self.arena.ground_leg_clear(
+                me["pos"], goal, float(me["stats"].get("radius", 2.5)),
+                float(me["stats"].get("height", 9.0)),
+            )
+        )
+
+    def _duel_vector(self, obs, target, enemies, urgent, current_margin):
+        """Keep a safe, favorable one-on-one fight inside weapon range."""
+        if target is None or urgent or current_margin < 27.0:
+            return None
+        me = obs["self"]
+        pos = me["pos"]
+        foe = target["pos"]
+        distance = distance2(pos, foe)
+        enemy_hp = target.get("hp")
+        if enemy_hp is None or not 14.0 <= distance <= 105.0:
+            return None
+        minimum_health = 0.52 if enemy_hp <= 220.0 else 0.65
+        if me["hp"] < me["max_hp"] * minimum_health:
+            return None
+        if any(
+            enemy["id"] != target["id"] and min(distance2(pos, enemy["pos"]), distance2(foe, enemy["pos"])) < 88.0
+            for enemy in enemies
+        ):
+            return None
+        if obs["t"] < self.damage_until and self.attacker not in (None, target["id"]):
+            return None
+        zone = obs["zone"]
+        if self._inside_margin(foe, zone["center"], zone["radius"]) < 19.0:
+            return None
+
+        weapons = self._weapon_slots(me)
+        if not self.arena.shot_clear(*self._direct_line(me, target)):
+            return None
+        outgoing = sum(amount for _, identifier, amount in self.damage_window if identifier == target["id"] and amount > 0)
+        incoming = -sum(amount for _, _, amount in self.damage_window if amount < 0)
+        enemy_weapons = target.get("weapons") or ()
+        early_advantage = (
+            len(weapons) > 1 and set(enemy_weapons) == {"gun"}
+            and me["hp"] > me["max_hp"] * 0.78 and enemy_hp <= me["hp"] * 1.05
+        )
+        finishing = outgoing > 0 and enemy_hp <= min(335.0, me["hp"] * 0.67) and incoming < me["hp"] * 0.36
+        winning_trade = outgoing >= 100.0 and outgoing > incoming * 1.25 and enemy_hp < me["hp"] * 0.80
+        if not (early_advantage or finishing or winning_trade):
+            return None
+        preferred = 50.0
+        if "lightning" in weapons and me["energy"] >= 27.0:
+            preferred = float(weapons["lightning"][1]["stats"]["range"]) * 0.76
+        elif "laser" in weapons:
+            preferred = 62.0
+        if finishing and "lightning" not in enemy_weapons:
+            preferred = min(preferred, 46.0)
+        if "lightning" in enemy_weapons and "lightning" not in weapons:
+            preferred = max(57.0, preferred)
+        away = unit((pos[0] - foe[0], pos[1] - foe[1]))
+        radial = clamp((preferred - distance) / 20.0, -1.0, 0.9)
+        tangent = (-away[1] * self.turn_sign, away[0] * self.turn_sign)
+        direction = unit((tangent[0] * 0.80 + away[0] * radial * 1.40,
+                          tangent[1] * 0.80 + away[1] * radial * 1.40))
+        return direction, distance > preferred + 18.0
+
+    def _safe_cube(self, obs, enemies, urgent, danger):
+        """Collect nearby rewards only when our arrival beats nearby opponents."""
+        now = float(obs["t"])
+        me = obs["self"]
+        pos = me["pos"]
+        cubes = obs.get("cubes") or ()
+        recent_attack = now < self.damage_until - 1.8 and (self.attacker is None or self.attacker < 100)
+        if urgent or danger or not cubes or recent_attack:
+            return None
+        distance_limit = 32.0 if now - self.last_kill < 8.0 else 22.0
+        speed = float(me["stats"].get("walk_speed", 11.7))
+        candidates = []
+        for cube in cubes:
+            goal = cube["pos"]
+            distance = distance2(pos, goal)
+            if distance > distance_limit or abs(pos[2] - goal[2]) > 3.8:
+                continue
+            arrival = max(0.0, distance - 3.3) / speed
+            if any(
+                distance2(goal, enemy["pos"]) < max(32.0, (arrival + 0.8) * 19.5)
+                for enemy in enemies
+            ):
+                continue
+            cluster = sum(distance2(goal, other["pos"]) < 6.0 for other in cubes)
+            candidates.append((distance - min(cluster, 8) * 3.0, cube["id"], cube))
+        for _, _, cube in sorted(candidates)[:3]:
+            if self._safe_ground_goal(obs, cube["pos"]):
+                return cube
+        return None
+
+    def _farm_target(self, obs, enemies, urgent, danger):
+        """Take short, quiet-window opportunities for the first few upgrades."""
+        me = obs["self"]
+        pos = me["pos"]
+        recent_attack = obs["t"] < self.damage_until and (self.attacker is None or self.attacker < 100)
+        if (
+            urgent or danger or recent_attack or me.get("cubes", 0) >= 5
+            or me["hp"] < me["max_hp"] * 0.82
+            or any(distance2(pos, enemy["pos"]) < 145.0 for enemy in enemies)
+        ):
+            return None
+        if any(
+            sound.get("age", 9.0) < 0.35 and sound.get("dist") in {"near", "mid"}
+            and sound["kind"] in {"gun", "laser", "lightning", "mortar", "boost"}
+            for sound in obs.get("sounds", ())
+        ):
+            return None
+        gun = self._weapon_slots(me)["gun"][1]
+        if gun.get("ammo", 12) <= 1 or gun.get("reload", 0.0) > 0.25:
+            return None
+        candidates = []
+        for actor in obs.get("mechs", ()):
+            if actor["kind"] == "npc" and 5.0 < distance2(pos, actor["pos"]) <= 27.0:
+                candidates.append((distance2(pos, actor["pos"]) + 0.035 * actor.get("hp", 350) - 16.0, actor))
+        for crate in obs.get("crates", ()):
+            if 5.0 < distance2(pos, crate["pos"]) <= 29.0:
+                candidates.append((distance2(pos, crate["pos"]) + 0.035 * crate.get("hp", 300), dict(crate, kind="crate")))
+        for _, target in sorted(candidates, key=lambda item: (item[0], item[1]["id"]))[:2]:
+            if self._safe_ground_goal(obs, target["pos"]) and self.arena.shot_clear(*self._direct_line(me, target)):
+                return target
+        return None
 
     def _select_pickup(self, obs):
         me = obs["self"]
@@ -525,6 +703,20 @@ class RoyaleBot:
             return None
         return solution
 
+    def _laser_charge_needed(self, me, target, stats):
+        full = float(stats["charge"])
+        hp = target.get("hp")
+        if hp is None or "damage" not in stats:
+            return full
+        cubes = self.cfg["cubes"]
+        scale = 1.0 + cubes["damage_per_cube"] * min(me.get("cubes", 0), cubes["stat_cap"])
+        multiplier = 1.0 + stats.get("cookoff", 0.6) if "mortar" in (target.get("weapons") or ()) else 1.0
+        # Add tolerance for armor and leave full charge as the default for stronger foes.
+        damage = float(stats["damage"]) * scale * multiplier * 0.84
+        min_fraction = float(stats.get("min_frac", 0.35))
+        fraction = clamp((hp / damage - min_fraction) / max(EPS, 1.0 - min_fraction), 0.0, 1.0)
+        return max(float(stats.get("min_charge", 0.15)), full * fraction)
+
     def _combat(self, obs, target):
         me = obs["self"]
         fire = [False, False]
@@ -558,10 +750,10 @@ class RoyaleBot:
             laser_aim = self._aim_between(*laser_line)
             clear = self.arena.shot_clear(*laser_line)
             if charge > 0.0:
-                full = float(stats["charge"])
-                if charge >= full - 0.15:
+                needed = self._laser_charge_needed(me, target, stats)
+                if charge >= needed - 0.15:
                     aim = laser_aim
-                fire[slot] = charge < full - 0.05 or not (clear and aligned(laser_aim))
+                fire[slot] = charge < needed - 0.025 or not (clear and aligned(laser_aim))
             elif weapon.get("cooldown", 0.0) <= 0.05 and distance <= stats["range"]:
                 fire[slot] = clear and aligned(laser_aim)
         elif "mortar" in slots and target["kind"] == "mech":
@@ -600,11 +792,7 @@ class RoyaleBot:
         me = obs["self"]
         pos = me["pos"]
         now = float(obs["t"])
-        for event in obs.get("events", []):
-            if event.get("type") == "damaged" and event.get("bearing") is not None:
-                self.damage_bearing = float(event["bearing"])
-                self.damage_until = now + 3.2
-                self.attacker = event.get("by")
+        self._record_combat(obs, now)
 
         enemies = [actor for actor in obs.get("mechs", []) if actor["kind"] == "mech"]
         target = self._primary_enemy(obs, enemies)
@@ -612,6 +800,8 @@ class RoyaleBot:
         threat, closest = self._threat_vector(obs, enemies)
         dodge, projectile_danger = self._projectile_dodge(obs)
         threatened = closest < 105.0 or now < self.damage_until or projectile_danger
+        duel = self._duel_vector(obs, target, enemies, urgent, current_margin)
+        reward = self._safe_cube(obs, enemies, urgent, projectile_danger) if duel is None else None
 
         objective = zone_vector
         objective_speed = 0.40  # below the default footstep threshold when walking
@@ -649,9 +839,26 @@ class RoyaleBot:
                         objective = unit((crate["pos"][0] - pos[0], crate["pos"][1] - pos[1]))
                         objective_speed = 0.65 if distance2(pos, crate["pos"]) > 9.0 else 0.0
 
+        farm = None
+        if reward is not None:
+            goal = reward["pos"]
+            objective = unit((goal[0] - pos[0], goal[1] - pos[1]))
+            objective_speed = 0.90
+        elif target is None and (pickup_distance >= 50.0 or all(me["weapons"])):
+            farm = self._farm_target(obs, enemies, urgent, projectile_danger)
+            if farm is not None:
+                goal = farm["pos"]
+                objective = unit((goal[0] - pos[0], goal[1] - pos[1]))
+                objective_speed = 0.75 if distance2(pos, goal) > 11.0 else 0.0
+
         desired = [objective[0] * (1.6 if urgent else 0.9), objective[1] * (1.6 if urgent else 0.9)]
-        desired[0] += threat[0] * 1.75 + dodge[0] * 2.8
-        desired[1] += threat[1] * 1.75 + dodge[1] * 2.8
+        if duel is not None:
+            direction, _ = duel
+            desired = [direction[i] * 2.1 + zone_vector[i] * 0.20 + dodge[i] * 3.3 for i in range(2)]
+        else:
+            threat_weight = 0.24 if reward is not None or farm is not None else 1.75
+            desired[0] += threat[0] * threat_weight + dodge[0] * 2.8
+            desired[1] += threat[1] * threat_weight + dodge[1] * 2.8
         desired = unit(desired, fallback=objective)
 
         commanded_before = length2(self.last_move)
@@ -674,15 +881,20 @@ class RoyaleBot:
             current_zone,
         )
 
-        move_scale = 1.0 if threatened or urgent or stuck else objective_speed
+        move_scale = 1.0 if (threatened or urgent or stuck) and farm is None else objective_speed
         move = [steered[0] * move_scale, steered[1] * move_scale]
         energy = float(me["energy"])
         boost = bool((urgent and energy > 22.0) or (threatened and energy > 46.0) or (stuck and energy > 25.0))
+        if duel is not None and not projectile_danger and not stuck:
+            boost = duel[1] and energy > 66.0
+        elif farm is not None and not stuck:
+            boost = False
         jump = bool(me["grounded"] and (projectile_danger or stuck or (closest < 32.0 and now < self.damage_until)) and now - self.last_jump > 1.15)
         if jump:
             self.last_jump = now
 
-        aim, fire, reload_now = self._combat(obs, target or (dict(crate, kind="crate") if crate else None))
+        crate_target = dict(crate, kind="crate") if crate is not None and reward is None else None
+        aim, fire, reload_now = self._combat(obs, target or farm or crate_target)
         action = {"move": move, "boost": boost, "jump": jump, "aim": aim, "fire": fire}
         if reload_now:
             action["reload"] = True

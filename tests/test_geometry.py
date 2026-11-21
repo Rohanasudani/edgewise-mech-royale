@@ -1,5 +1,6 @@
 import importlib.util
 import math
+from collections import deque
 from pathlib import Path
 import unittest
 
@@ -106,6 +107,18 @@ class CombatTests(unittest.TestCase):
         self.me["aim"] = self.bot._direct_aim(self.me, self.target)
         self.assertEqual(self.bot._combat(self.obs, self.target)[1], [True, False])
 
+    def test_releases_partial_laser_charge_to_finish_a_weak_target(self):
+        laser = {"kind": "laser", "charge": 0.25, "stats": {
+            "charge": 0.75, "range": 280.0, "damage": 315.0, "min_charge": 0.15, "min_frac": 0.35,
+        }}
+        self.bot.cfg = {"cubes": {"damage_per_cube": 0.04, "stat_cap": 10}}
+        self.me["weapons"][1] = laser
+        self.target["hp"] = 110
+        self.me["aim"] = self.bot._direct_aim(self.me, self.target)
+        self.assertFalse(self.bot._combat(self.obs, self.target)[1][1])
+        self.target["hp"] = 800
+        self.assertTrue(self.bot._combat(self.obs, self.target)[1][1])
+
     def test_tops_up_magazine_during_lull(self):
         self.gun["ammo"] = 6
         self.assertTrue(self.bot._combat(self.obs, None)[2])
@@ -141,6 +154,68 @@ class CombatTests(unittest.TestCase):
         self.set_up_wall(20.0)
         exposed = dict(self.target, id=8, pos=[75, 30, 0])
         self.assertEqual(self.bot._primary_enemy(self.obs, [self.target, exposed]), exposed)
+
+
+class ProgressionTests(unittest.TestCase):
+    def setUp(self):
+        self.bot = BOT.RoyaleBot.__new__(BOT.RoyaleBot)
+        self.bot.arena = BOT.Arena.__new__(BOT.Arena)
+        self.bot.arena.ok = False
+        self.bot.damage_window = deque()
+        self.bot.damage_bearing = None
+        self.bot.damage_until = -1.0
+        self.bot.attacker = None
+        self.bot.last_kill = -math.inf
+        self.bot.turn_sign = 1.0
+        self.obs = {
+            "t": 5.0, "self": {
+                "id": 1, "pos": [0, 0, 0], "hp": 1200, "max_hp": 1400,
+                "energy": 75, "stats": {}, "weapons": [{"kind": "gun", "ammo": 10}, None],
+            },
+            "zone": {"center": [0, 0], "radius": 300, "next_center": [0, 0],
+                     "next_radius": 200, "shrink_end": 100},
+        }
+        self.foe = {"id": 2, "kind": "mech", "pos": [72, 0, 0], "hp": 210, "max_hp": 1400}
+
+    def test_finishes_a_wounded_opponent_only_while_isolated(self):
+        self.obs["events"] = [{"type": "hit", "target": 2, "amount": 90}]
+        self.bot._record_combat(self.obs, 5.0)
+        duel = self.bot._duel_vector(self.obs, self.foe, [self.foe], False, 300.0)
+        self.assertGreater(duel[0][0], 0.5)
+        second = dict(self.foe, id=3, pos=[51, 20, 0])
+        self.assertIsNone(self.bot._duel_vector(self.obs, self.foe, [self.foe, second], False, 300.0))
+        self.assertIsNone(self.bot._duel_vector(self.obs, self.foe, [self.foe], True, 300.0))
+
+    def test_kill_releases_stale_threat_and_subsequent_cube_collect(self):
+        self.bot.attacker = 2
+        self.bot.damage_bearing = 0.0
+        self.bot.damage_until = 7.0
+        self.obs["events"] = [
+            {"type": "damaged", "by": 2, "bearing": 0.0, "amount": 45},
+            {"type": "kill", "target": 2},
+        ]
+        self.bot._record_combat(self.obs, 5.0)
+        self.assertIsNone(self.bot.attacker)
+        cube = {"id": 5001, "pos": [26, 0, 0]}
+        self.obs["cubes"] = [cube]
+        self.assertEqual(self.bot._safe_cube(self.obs, [], False, False), cube)
+        rival = dict(self.foe, id=3, pos=[42, 0, 0])
+        self.assertIsNone(self.bot._safe_cube(self.obs, [rival], False, False))
+
+    def test_farm_target_yields_to_new_pressure(self):
+        crate = {"id": 1001, "pos": [20, 0, 0], "hp": 200}
+        self.obs["crates"] = [crate]
+        self.assertEqual(self.bot._farm_target(self.obs, [], False, False)["id"], crate["id"])
+        self.assertIsNone(self.bot._farm_target(self.obs, [self.foe], False, False))
+
+    def test_farm_can_finish_a_drone_that_returns_fire(self):
+        drone = {"id": 100, "kind": "npc", "pos": [20, 0, 0], "hp": 120}
+        self.obs["mechs"] = [drone]
+        self.bot.attacker = drone["id"]
+        self.bot.damage_until = 8.0
+        self.assertEqual(self.bot._farm_target(self.obs, [], False, False), drone)
+        self.bot.attacker = 2
+        self.assertIsNone(self.bot._farm_target(self.obs, [], False, False))
 
 
 if __name__ == "__main__":
